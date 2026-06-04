@@ -25,6 +25,25 @@ The app reads these env vars (matching `.env.example`):
 
 By default, the server listens on `0.0.0.0:3000`.
 
+### Sensitive keys redaction
+
+Headers and query parameters with sensitive keys (auth, tokens, secrets, etc.) are automatically redacted to `[REDACTED]` before storage.
+
+Override the default denylist via environment variables (comma-separated, case-insensitive):
+
+```bash
+# Custom header keys to redact
+SENSITIVE_HEADERS=authorization,x-api-key,custom-token
+
+# Custom query parameter keys to redact
+SENSITIVE_QUERY_KEYS=api_key,access_token,custom_secret
+```
+
+Patterns supported:
+- Exact match: `authorization` → matches exactly "authorization"
+- Suffix match: `*token` → matches keys ending with "_token", "refresh_token", etc.
+- Contains match: `*secret*` → matches any key containing "secret"
+
 ## Run
 
 ```bash

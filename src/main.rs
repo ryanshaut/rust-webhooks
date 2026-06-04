@@ -17,6 +17,15 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct AppState {
     db: PgPool,
+    sensitive_headers: SensitiveKeysConfig,
+    sensitive_query_keys: SensitiveKeysConfig,
+}
+
+#[derive(Clone)]
+struct SensitiveKeysConfig {
+    exact_matches: Vec<String>,
+    contains: Vec<String>,
+    suffix: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -41,10 +50,13 @@ async fn main() {
         .await
         .expect("failed to ensure database schema");
 
+    let sensitive_headers = load_sensitive_keys_config("SENSITIVE_HEADERS", DEFAULT_SENSITIVE_HEADERS);
+    let sensitive_query_keys = load_sensitive_keys_config("SENSITIVE_QUERY_KEYS", DEFAULT_SENSITIVE_QUERY_KEYS);
+
     let app = Router::new()
         .route("/api/webhooks", any(capture_webhook))
         .route("/api/webhooks/{*rest}", any(capture_webhook))
-        .with_state(AppState { db });
+        .with_state(AppState { db, sensitive_headers, sensitive_query_keys });
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -90,8 +102,8 @@ async fn capture_webhook(
     let id = Uuid::new_v4();
     let received_at = Utc::now();
 
-    let headers_json = headers_to_json(&headers);
-    let query_json = query_to_json(&query);
+    let headers_json = headers_to_json(&headers, &state.sensitive_headers);
+    let query_json = query_to_json(&query, &state.sensitive_query_keys);
 
     let body_text = String::from_utf8(body.to_vec()).ok();
     let body_base64 = encode_base64(&body);
@@ -139,12 +151,12 @@ async fn capture_webhook(
     }
 }
 
-fn headers_to_json(headers: &HeaderMap) -> Value {
+fn headers_to_json(headers: &HeaderMap, config: &SensitiveKeysConfig) -> Value {
     let mut map = Map::new();
 
     for (name, value) in headers {
         let key = name.to_string();
-        let is_sensitive = is_sensitive_header_key(&key);
+        let is_sensitive = is_sensitive_key(&key, config);
 
         if let Ok(value_str) = value.to_str() {
             let stored_value = if is_sensitive {
@@ -169,11 +181,11 @@ fn headers_to_json(headers: &HeaderMap) -> Value {
     Value::Object(map)
 }
 
-fn query_to_json(query: &HashMap<String, String>) -> Value {
+fn query_to_json(query: &HashMap<String, String>, config: &SensitiveKeysConfig) -> Value {
     let mut map = Map::new();
 
     for (key, value) in query {
-        let stored_value = if is_sensitive_query_key(key) {
+        let stored_value = if is_sensitive_key(key, config) {
             "[REDACTED]".to_string()
         } else {
             value.clone()
@@ -185,55 +197,61 @@ fn query_to_json(query: &HashMap<String, String>) -> Value {
     Value::Object(map)
 }
 
-fn is_sensitive_header_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
+const DEFAULT_SENSITIVE_HEADERS: &str = "authorization,proxy-authorization,cookie,set-cookie,x-api-key,api-key,x-auth-token,x-csrf-token,x-signature,stripe-signature,x-hub-signature,x-hub-signature-256,x-webhook-signature,x-amz-security-token";
 
-    matches!(
-        lower.as_str(),
-        "authorization"
-            | "proxy-authorization"
-            | "cookie"
-            | "set-cookie"
-            | "x-api-key"
-            | "api-key"
-            | "x-auth-token"
-            | "x-csrf-token"
-            | "x-signature"
-            | "stripe-signature"
-            | "x-hub-signature"
-            | "x-hub-signature-256"
-            | "x-webhook-signature"
-            | "x-amz-security-token"
-    ) || lower.contains("token")
-        || lower.contains("secret")
-        || lower.contains("password")
+const DEFAULT_SENSITIVE_QUERY_KEYS: &str = "auth,authorization,token,access_token,refresh_token,id_token,api_key,apikey,key,secret,client_secret,signature,sig,password,passwd,jwt";
+
+fn load_sensitive_keys_config(env_var: &str, default: &str) -> SensitiveKeysConfig {
+    let csv = env::var(env_var).unwrap_or_else(|_| default.to_string());
+
+    let mut exact_matches = Vec::new();
+    let mut contains = Vec::new();
+    let mut suffix = Vec::new();
+
+    for key in csv.split(',') {
+        let trimmed = key.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('*') && trimmed.ends_with('*') {
+            contains.push(trimmed.trim_matches('*').to_string());
+        } else if trimmed.ends_with('*') {
+            suffix.push(trimmed.trim_end_matches('*').to_string());
+        } else {
+            exact_matches.push(trimmed);
+        }
+    }
+
+    SensitiveKeysConfig {
+        exact_matches,
+        contains,
+        suffix,
+    }
 }
 
-fn is_sensitive_query_key(key: &str) -> bool {
+fn is_sensitive_key(key: &str, config: &SensitiveKeysConfig) -> bool {
     let lower = key.to_ascii_lowercase();
 
-    matches!(
-        lower.as_str(),
-        "auth"
-            | "authorization"
-            | "token"
-            | "access_token"
-            | "refresh_token"
-            | "id_token"
-            | "api_key"
-            | "apikey"
-            | "key"
-            | "secret"
-            | "client_secret"
-            | "signature"
-            | "sig"
-            | "password"
-            | "passwd"
-            | "jwt"
-    ) || lower.ends_with("_token")
-        || lower.ends_with("_secret")
-        || lower.ends_with("_key")
-        || lower.ends_with("_signature")
+    for exact in &config.exact_matches {
+        if lower == *exact {
+            return true;
+        }
+    }
+
+    for pattern in &config.contains {
+        if lower.contains(pattern) {
+            return true;
+        }
+    }
+
+    for prefix in &config.suffix {
+        if lower.ends_with(prefix) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn encode_base64(data: &[u8]) -> String {
