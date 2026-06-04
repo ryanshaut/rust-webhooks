@@ -1,0 +1,19 @@
+# Generated files
+/target/
+
+# Cargo lock (keep for binaries, remove for libraries)
+# Cargo.lock
+
+# Environment variables
+.env
+.env.*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
