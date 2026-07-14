@@ -1,5 +1,5 @@
 
-.PHONY: build run debug k6 k6-smoke
+.PHONY: build run debug test k6 k6-smoke
 
 build:
 	cargo build --release
@@ -9,6 +9,9 @@ run:
 
 debug:
 	cargo run
+
+test:
+	cargo +stable test
 
 k6:
 	docker run --rm -i \

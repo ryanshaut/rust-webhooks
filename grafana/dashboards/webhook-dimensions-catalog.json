@@ -43,7 +43,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT tenant) AS value FROM enriched;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT tenant) AS value FROM enriched;"
                     },
                     "version": "v0"
                   },
@@ -123,7 +123,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT app) AS value FROM enriched;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT app) AS value FROM enriched;"
                     },
                     "version": "v0"
                   },
@@ -203,7 +203,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT event) AS value FROM enriched;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT event) AS value FROM enriched;"
                     },
                     "version": "v0"
                   },
@@ -283,7 +283,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT (tenant, app, event)) AS value FROM enriched;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT COUNT(DISTINCT (tenant, app, event)) AS value FROM enriched;"
                     },
                     "version": "v0"
                   },
@@ -363,7 +363,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT tenant, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY tenant\nORDER BY webhook_count DESC, tenant\nLIMIT 500;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT tenant, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY tenant\nORDER BY webhook_count DESC, tenant\nLIMIT 500;"
                     },
                     "version": "v0"
                   },
@@ -445,7 +445,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT tenant, app, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY tenant, app\nORDER BY webhook_count DESC, tenant, app\nLIMIT 1000;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT tenant, app, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY tenant, app\nORDER BY webhook_count DESC, tenant, app\nLIMIT 1000;"
                     },
                     "version": "v0"
                   },
@@ -527,7 +527,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT app, event, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY app, event\nORDER BY webhook_count DESC, app, event\nLIMIT 1000;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT app, event, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY app, event\nORDER BY webhook_count DESC, app, event\nLIMIT 1000;"
                     },
                     "version": "v0"
                   },
@@ -609,7 +609,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT tenant, app, event, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY tenant, app, event\nORDER BY webhook_count DESC, tenant, app, event\nLIMIT 2000;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT tenant, app, event, COUNT(*) AS webhook_count, MIN(received_at) AS first_seen, MAX(received_at) AS last_seen\nFROM enriched\nGROUP BY tenant, app, event\nORDER BY webhook_count DESC, tenant, app, event\nLIMIT 2000;"
                     },
                     "version": "v0"
                   },
@@ -691,7 +691,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    path,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT tenant, app, event, COUNT(*) AS webhook_count, MAX(received_at) AS last_seen, (ARRAY_AGG(path ORDER BY received_at DESC))[1] AS sample_path\nFROM enriched\nGROUP BY tenant, app, event\nORDER BY last_seen DESC\nLIMIT 250;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    received_at,\n    path,\n    status,\n    active,\n    substatus,\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT\n  tenant,\n  app,\n  event,\n  COUNT(*) AS webhook_count,\n  COUNT(*) FILTER (WHERE status = 'new' AND active = TRUE) AS pending_new,\n  COUNT(*) FILTER (WHERE status = 'received' AND active = TRUE) AS in_flight,\n  COUNT(*) FILTER (WHERE status = 'success' AND active = FALSE) AS completed_success,\n  COUNT(*) FILTER (WHERE status = 'failed' AND active = FALSE) AS completed_failed,\n  COUNT(*) FILTER (WHERE status = 'expired') AS expired_ttl,\n  MAX(received_at) AS last_seen,\n  (ARRAY_AGG(path ORDER BY received_at DESC))[1] AS sample_path,\n  (ARRAY_AGG(COALESCE(substatus, '') ORDER BY received_at DESC))[1] AS latest_substatus\nFROM enriched\nGROUP BY tenant, app, event\nORDER BY last_seen DESC\nLIMIT 250;"
                     },
                     "version": "v0"
                   },
@@ -706,7 +706,7 @@
         "description": "",
         "id": 9,
         "links": [],
-        "title": "Most Recent Dimension Activity",
+        "title": "Recent Dimension Lifecycle Activity",
         "vizConfig": {
           "group": "table",
           "kind": "VizConfig",

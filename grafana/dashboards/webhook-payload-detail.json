@@ -43,7 +43,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.method,\n    w.path,\n    w.query_params,\n    w.headers,\n    w.body_text,\n    w.body_base64,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT id, received_at, method, path, tenant, app, event, body_text IS NOT NULL AS utf8_payload, octet_length(decode(body_base64, 'base64')) AS payload_bytes\nFROM selected_webhook;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.method,\n    w.path,\n    w.status,\n    w.active,\n    w.substatus,\n    w.ttl_expires_at,\n    w.query_params,\n    w.headers,\n    w.body_text,\n    w.body_base64,\n    COALESCE(NULLIF(w.tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(w.app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(w.event, ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT id, received_at, method, path, tenant, app, event, status, active, substatus, ttl_expires_at, body_text IS NOT NULL AS utf8_payload, octet_length(decode(body_base64, 'base64')) AS payload_bytes\nFROM selected_webhook;"
                     },
                     "version": "v0"
                   },
@@ -119,7 +119,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.query_params,\n    w.body_text,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT kv.key, kv.value\nFROM selected_webhook sw, LATERAL jsonb_each_text(sw.query_params) AS kv(key, value)\nORDER BY kv.key;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.query_params,\n    w.body_text,\n    COALESCE(NULLIF(w.tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(w.app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(w.event, ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT kv.key, kv.value\nFROM selected_webhook sw, LATERAL jsonb_each_text(sw.query_params) AS kv(key, value)\nORDER BY kv.key;"
                     },
                     "version": "v0"
                   },
@@ -195,7 +195,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.headers,\n    w.body_text,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT kv.key, string_agg(header_values.value, ', ' ORDER BY header_values.ordinality) AS value\nFROM selected_webhook sw,\nLATERAL jsonb_each(sw.headers) AS kv(key, raw_value),\nLATERAL jsonb_array_elements_text(kv.raw_value) WITH ORDINALITY AS header_values(value, ordinality)\nGROUP BY kv.key\nORDER BY kv.key;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.headers,\n    w.body_text,\n    COALESCE(NULLIF(w.tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(w.app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(w.event, ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT kv.key, string_agg(header_values.value, ', ' ORDER BY header_values.ordinality) AS value\nFROM selected_webhook sw,\nLATERAL jsonb_each(sw.headers) AS kv(key, raw_value),\nLATERAL jsonb_array_elements_text(kv.raw_value) WITH ORDINALITY AS header_values(value, ordinality)\nGROUP BY kv.key\nORDER BY kv.key;"
                     },
                     "version": "v0"
                   },
@@ -271,7 +271,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.body_text,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT 'body_text' AS field, COALESCE(body_text, '[non-UTF8 payload stored in body_base64]') AS value\nFROM selected_webhook;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.body_text,\n    COALESCE(NULLIF(w.tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(w.app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(w.event, ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT 'body_text' AS field, COALESCE(body_text, '[non-UTF8 payload stored in body_base64]') AS value\nFROM selected_webhook;"
                     },
                     "version": "v0"
                   },
@@ -347,7 +347,7 @@
                     "spec": {
                       "format": "table",
                       "rawQuery": true,
-                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.body_text,\n    w.body_base64,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT 'body_base64' AS field, body_base64 AS value\nFROM selected_webhook;"
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.body_text,\n    w.body_base64,\n    COALESCE(NULLIF(w.tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(w.app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(w.event, ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT 'body_base64' AS field, body_base64 AS value\nFROM selected_webhook;"
                     },
                     "version": "v0"
                   },
@@ -534,7 +534,7 @@
           "text": "All",
           "value": "__all"
         },
-        "definition": "WITH enriched AS (\n  SELECT COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT tenant AS __text, tenant AS __value\nFROM enriched\nWHERE tenant IS NOT NULL\nORDER BY 1;",
+        "definition": "WITH enriched AS (\n  SELECT COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT tenant AS __text, tenant AS __value\nFROM enriched\nWHERE tenant IS NOT NULL\nORDER BY 1;",
         "hide": "dontHide",
         "includeAll": true,
         "label": "tenant",
@@ -548,7 +548,7 @@
           "group": "postgres",
           "kind": "DataQuery",
           "spec": {
-            "__legacyStringValue": "WITH enriched AS (\n  SELECT COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT tenant AS __text, tenant AS __value\nFROM enriched\nWHERE tenant IS NOT NULL\nORDER BY 1;"
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT tenant AS __text, tenant AS __value\nFROM enriched\nWHERE tenant IS NOT NULL\nORDER BY 1;"
           },
           "version": "v0"
         },
@@ -568,7 +568,7 @@
           "text": "All",
           "value": "__all"
         },
-        "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT app AS __text, app AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\nORDER BY 1;",
+        "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT app AS __text, app AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\nORDER BY 1;",
         "hide": "dontHide",
         "includeAll": true,
         "label": "app",
@@ -582,7 +582,7 @@
           "group": "postgres",
           "kind": "DataQuery",
           "spec": {
-            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT app AS __text, app AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\nORDER BY 1;"
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT app AS __text, app AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\nORDER BY 1;"
           },
           "version": "v0"
         },
@@ -602,7 +602,7 @@
           "text": "All",
           "value": "__all"
         },
-        "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT event AS __text, event AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\nORDER BY 1;",
+        "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT event AS __text, event AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\nORDER BY 1;",
         "hide": "dontHide",
         "includeAll": true,
         "label": "event",
@@ -616,7 +616,7 @@
           "group": "postgres",
           "kind": "DataQuery",
           "spec": {
-            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT event AS __text, event AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\nORDER BY 1;"
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT event AS __text, event AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\nORDER BY 1;"
           },
           "version": "v0"
         },
@@ -649,7 +649,7 @@
           "text": "",
           "value": ""
         },
-        "definition": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event,\n    left(COALESCE(w.body_text, '[binary payload]'), 80) AS payload_preview\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n)\nSELECT CONCAT(to_char(received_at, 'YYYY-MM-DD HH24:MI:SS TZ'), ' | ', tenant, ' | ', app, ' | ', event, ' | ', left(path, 60)) AS __text, id::text AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\n  AND ('${event}' = '__all' OR event = '${event}')\n  AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(payload_preview, '') ILIKE '%' || '${payload_search}' || '%')\nORDER BY received_at DESC\nLIMIT 200;",
+        "definition": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    COALESCE(NULLIF(w.tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(w.app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(w.event, ''), 'unknown') AS event,\n    left(COALESCE(w.body_text, '[binary payload]'), 80) AS payload_preview\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n)\nSELECT CONCAT(to_char(received_at, 'YYYY-MM-DD HH24:MI:SS TZ'), ' | ', tenant, ' | ', app, ' | ', event, ' | ', left(path, 60)) AS __text, id::text AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\n  AND ('${event}' = '__all' OR event = '${event}')\n  AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(payload_preview, '') ILIKE '%' || '${payload_search}' || '%')\nORDER BY received_at DESC\nLIMIT 200;",
         "hide": "dontHide",
         "includeAll": false,
         "label": "webhook_id",
@@ -663,7 +663,7 @@
           "group": "postgres",
           "kind": "DataQuery",
           "spec": {
-            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event,\n    left(COALESCE(w.body_text, '[binary payload]'), 80) AS payload_preview\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n)\nSELECT CONCAT(to_char(received_at, 'YYYY-MM-DD HH24:MI:SS TZ'), ' | ', tenant, ' | ', app, ' | ', event, ' | ', left(path, 60)) AS __text, id::text AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\n  AND ('${event}' = '__all' OR event = '${event}')\n  AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(payload_preview, '') ILIKE '%' || '${payload_search}' || '%')\nORDER BY received_at DESC\nLIMIT 200;"
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    COALESCE(NULLIF(w.tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(w.app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(w.event, ''), 'unknown') AS event,\n    left(COALESCE(w.body_text, '[binary payload]'), 80) AS payload_preview\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n)\nSELECT CONCAT(to_char(received_at, 'YYYY-MM-DD HH24:MI:SS TZ'), ' | ', tenant, ' | ', app, ' | ', event, ' | ', left(path, 60)) AS __text, id::text AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\n  AND ('${event}' = '__all' OR event = '${event}')\n  AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(payload_preview, '') ILIKE '%' || '${payload_search}' || '%')\nORDER BY received_at DESC\nLIMIT 200;"
           },
           "version": "v0"
         },

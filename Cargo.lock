@@ -1165,6 +1165,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tower",
  "urlencoding",
  "uuid",
 ]

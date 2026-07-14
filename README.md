@@ -8,10 +8,12 @@ A simple Rust webhook catcher API.
 - Stores each request in Postgres with:
   - HTTP method
   - request path
+  - webhook dimensions (`tenant`, `app`, `event`) parsed from path when present
   - query params (JSON)
   - headers (JSON)
   - body as UTF-8 text when possible
   - raw body as base64 for non-UTF8 payloads
+  - delivery lifecycle fields: `status`, `active`, `substatus`, `ttl_expires_at`
 
 ## Configuration
 
@@ -22,6 +24,7 @@ The app reads these env vars (matching `.env.example`):
 - `DB_HOST`
 - `DB_PORT`
 - `DB_DATABASE`
+- `DEFAULT_RECEIVE_TTL_SECONDS` (optional, default `300`)
 
 By default, the server listens on `0.0.0.0:3000`.
 
@@ -84,6 +87,68 @@ make k6-smoke
 The table is auto-created on startup:
 
 `incoming_webhooks`
+
+## Consumer API (peek / receive / complete / check-in)
+
+A "webhook" can be scoped by either:
+- `tenant/app/event` (exactly one stream)
+- `tenant/app` (all events for that tenant + app)
+
+Incoming webhooks are inserted as:
+- `status = new`
+- `active = true`
+- `substatus = null`
+
+When a consumer receives a webhook, it moves to `status = received` and gets a TTL.
+If the consumer never completes it before TTL expiration, it is marked:
+- `status = expired`
+- `active = false`
+- `substatus = retry-ttl`
+
+### Endpoints
+
+- `GET /api/consumer/peek/{tenant}/{app}`
+- `GET /api/consumer/peek/{tenant}/{app}/{event}`
+
+Returns the next pending (`new`) webhook without claiming it.
+
+- `POST /api/consumer/receive/{tenant}/{app}?ttl_seconds=300`
+- `POST /api/consumer/receive/{tenant}/{app}/{event}?ttl_seconds=300`
+
+Claims and returns the next pending webhook, moving it to `received` with TTL. If `ttl_seconds` is omitted, `DEFAULT_RECEIVE_TTL_SECONDS` is used.
+
+- `POST /api/consumer/webhooks/{id}/complete`
+
+Mark a previously received webhook as finished.
+
+Request body:
+
+```json
+{
+  "outcome": "success"
+}
+```
+
+or
+
+```json
+{
+  "outcome": "failed",
+  "substatus": "retry-transient"
+}
+```
+
+- `POST /api/consumer/webhooks/{id}/check-in?ttl_seconds=300`
+
+Extends TTL for a currently `received` webhook.
+
+- `GET /api/operator/status`
+
+Read-only operator summary endpoint. Returns aggregate counts across lifecycle states without mutating webhook status.
+
+- `GET /api/operator/webhooks/{id}/status`
+
+Read-only operator endpoint that returns the lifecycle status for a specific webhook ID (the ID returned when the webhook was accepted).
 
 ## Grafana dashboards
 
