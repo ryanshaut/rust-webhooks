@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: Webhooks Postgres
+    uid: webhooks-postgres
+    type: postgres
+    access: proxy
+    url: db:5432
+    user: postgres
+    database: rust-webhooks
+    isDefault: true
+    editable: false
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false

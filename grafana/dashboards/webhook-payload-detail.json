@@ -1,0 +1,678 @@
+{
+  "annotations": [
+    {
+      "kind": "AnnotationQuery",
+      "spec": {
+        "builtIn": true,
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "query": {
+          "datasource": {
+            "name": "-- Grafana --"
+          },
+          "group": "grafana",
+          "kind": "DataQuery",
+          "spec": {},
+          "version": "v0"
+        }
+      }
+    }
+  ],
+  "cursorSync": "Off",
+  "editable": true,
+  "elements": {
+    "panel-1": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "$datasource"
+                    },
+                    "group": "postgres",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "format": "table",
+                      "rawQuery": true,
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.method,\n    w.path,\n    w.query_params,\n    w.headers,\n    w.body_text,\n    w.body_base64,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT id, received_at, method, path, tenant, app, event, body_text IS NOT NULL AS utf8_payload, octet_length(decode(body_base64, 'base64')) AS payload_bytes\nFROM selected_webhook;"
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "",
+        "id": 1,
+        "links": [],
+        "title": "Webhook Metadata",
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "footer": {
+                    "reducers": []
+                  },
+                  "inspect": false
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true
+            }
+          },
+          "version": "13.1.0"
+        }
+      }
+    },
+    "panel-2": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "$datasource"
+                    },
+                    "group": "postgres",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "format": "table",
+                      "rawQuery": true,
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.query_params,\n    w.body_text,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT kv.key, kv.value\nFROM selected_webhook sw, LATERAL jsonb_each_text(sw.query_params) AS kv(key, value)\nORDER BY kv.key;"
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "",
+        "id": 2,
+        "links": [],
+        "title": "Query Params",
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "footer": {
+                    "reducers": []
+                  },
+                  "inspect": false
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true
+            }
+          },
+          "version": "13.1.0"
+        }
+      }
+    },
+    "panel-3": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "$datasource"
+                    },
+                    "group": "postgres",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "format": "table",
+                      "rawQuery": true,
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.headers,\n    w.body_text,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT kv.key, string_agg(header_values.value, ', ' ORDER BY header_values.ordinality) AS value\nFROM selected_webhook sw,\nLATERAL jsonb_each(sw.headers) AS kv(key, raw_value),\nLATERAL jsonb_array_elements_text(kv.raw_value) WITH ORDINALITY AS header_values(value, ordinality)\nGROUP BY kv.key\nORDER BY kv.key;"
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "",
+        "id": 3,
+        "links": [],
+        "title": "Headers",
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "footer": {
+                    "reducers": []
+                  },
+                  "inspect": false
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "cellHeight": "sm",
+              "showHeader": true
+            }
+          },
+          "version": "13.1.0"
+        }
+      }
+    },
+    "panel-4": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "$datasource"
+                    },
+                    "group": "postgres",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "format": "table",
+                      "rawQuery": true,
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.body_text,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT 'body_text' AS field, COALESCE(body_text, '[non-UTF8 payload stored in body_base64]') AS value\nFROM selected_webhook;"
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "",
+        "id": 4,
+        "links": [],
+        "title": "Payload Body",
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "footer": {
+                    "reducers": []
+                  },
+                  "inspect": false
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "cellHeight": "md",
+              "showHeader": true
+            }
+          },
+          "version": "13.1.0"
+        }
+      }
+    },
+    "panel-5": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "$datasource"
+                    },
+                    "group": "postgres",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "format": "table",
+                      "rawQuery": true,
+                      "rawSql": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    w.body_text,\n    w.body_base64,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n), selected_webhook AS (\n  SELECT *\n  FROM enriched\n  WHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n    AND ('${app}' = '__all' OR app = '${app}')\n    AND ('${event}' = '__all' OR event = '${event}')\n    AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(body_text, '') ILIKE '%' || '${payload_search}' || '%')\n    AND ('${webhook_id}' = '' OR id::text = ${webhook_id:singlequote})\n  ORDER BY received_at DESC\n  LIMIT 1\n)\nSELECT 'body_base64' AS field, body_base64 AS value\nFROM selected_webhook;"
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "",
+        "id": 5,
+        "links": [],
+        "title": "Raw Base64 Payload",
+        "vizConfig": {
+          "group": "table",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "custom": {
+                  "align": "auto",
+                  "cellOptions": {
+                    "type": "auto"
+                  },
+                  "footer": {
+                    "reducers": []
+                  },
+                  "inspect": false
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              "overrides": []
+            },
+            "options": {
+              "cellHeight": "md",
+              "showHeader": true
+            }
+          },
+          "version": "13.1.0"
+        }
+      }
+    }
+  },
+  "layout": {
+    "kind": "GridLayout",
+    "spec": {
+      "items": [
+        {
+          "kind": "GridLayoutItem",
+          "spec": {
+            "element": {
+              "kind": "ElementReference",
+              "name": "panel-1"
+            },
+            "height": 8,
+            "width": 24,
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "kind": "GridLayoutItem",
+          "spec": {
+            "element": {
+              "kind": "ElementReference",
+              "name": "panel-2"
+            },
+            "height": 10,
+            "width": 12,
+            "x": 0,
+            "y": 8
+          }
+        },
+        {
+          "kind": "GridLayoutItem",
+          "spec": {
+            "element": {
+              "kind": "ElementReference",
+              "name": "panel-3"
+            },
+            "height": 10,
+            "width": 12,
+            "x": 12,
+            "y": 8
+          }
+        },
+        {
+          "kind": "GridLayoutItem",
+          "spec": {
+            "element": {
+              "kind": "ElementReference",
+              "name": "panel-4"
+            },
+            "height": 10,
+            "width": 24,
+            "x": 0,
+            "y": 18
+          }
+        },
+        {
+          "kind": "GridLayoutItem",
+          "spec": {
+            "element": {
+              "kind": "ElementReference",
+              "name": "panel-5"
+            },
+            "height": 10,
+            "width": 24,
+            "x": 0,
+            "y": 28
+          }
+        }
+      ]
+    }
+  },
+  "links": [],
+  "liveNow": false,
+  "preload": false,
+  "tags": [
+    "webhooks",
+    "payload"
+  ],
+  "timeSettings": {
+    "autoRefresh": "30s",
+    "autoRefreshIntervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ],
+    "fiscalYearStartMonth": 0,
+    "from": "now-24h",
+    "hideTimepicker": false,
+    "timezone": "browser",
+    "to": "now"
+  },
+  "title": "Webhook Payload Detail",
+  "variables": [
+    {
+      "kind": "DatasourceVariable",
+      "spec": {
+        "allowCustomValue": true,
+        "current": {
+          "text": "rust-webhooks",
+          "value": "dfs352vbjer5sf"
+        },
+        "hide": "dontHide",
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "pluginId": "grafana-postgresql-datasource",
+        "refresh": "onDashboardLoad",
+        "regex": "",
+        "skipUrlSync": false
+      }
+    },
+    {
+      "kind": "QueryVariable",
+      "spec": {
+        "allValue": "__all",
+        "allowCustomValue": true,
+        "current": {
+          "text": "All",
+          "value": "__all"
+        },
+        "definition": "WITH enriched AS (\n  SELECT COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT tenant AS __text, tenant AS __value\nFROM enriched\nWHERE tenant IS NOT NULL\nORDER BY 1;",
+        "hide": "dontHide",
+        "includeAll": true,
+        "label": "tenant",
+        "multi": false,
+        "name": "tenant",
+        "options": [],
+        "query": {
+          "datasource": {
+            "name": "$datasource"
+          },
+          "group": "postgres",
+          "kind": "DataQuery",
+          "spec": {
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT tenant AS __text, tenant AS __value\nFROM enriched\nWHERE tenant IS NOT NULL\nORDER BY 1;"
+          },
+          "version": "v0"
+        },
+        "refresh": "onTimeRangeChanged",
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": "alphabeticalAsc"
+      }
+    },
+    {
+      "kind": "QueryVariable",
+      "spec": {
+        "allValue": "__all",
+        "allowCustomValue": true,
+        "current": {
+          "text": "All",
+          "value": "__all"
+        },
+        "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT app AS __text, app AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\nORDER BY 1;",
+        "hide": "dontHide",
+        "includeAll": true,
+        "label": "app",
+        "multi": false,
+        "name": "app",
+        "options": [],
+        "query": {
+          "datasource": {
+            "name": "$datasource"
+          },
+          "group": "postgres",
+          "kind": "DataQuery",
+          "spec": {
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT app AS __text, app AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\nORDER BY 1;"
+          },
+          "version": "v0"
+        },
+        "refresh": "onTimeRangeChanged",
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": "alphabeticalAsc"
+      }
+    },
+    {
+      "kind": "QueryVariable",
+      "spec": {
+        "allValue": "__all",
+        "allowCustomValue": true,
+        "current": {
+          "text": "All",
+          "value": "__all"
+        },
+        "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT event AS __text, event AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\nORDER BY 1;",
+        "hide": "dontHide",
+        "includeAll": true,
+        "label": "event",
+        "multi": false,
+        "name": "event",
+        "options": [],
+        "query": {
+          "datasource": {
+            "name": "$datasource"
+          },
+          "group": "postgres",
+          "kind": "DataQuery",
+          "spec": {
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT event AS __text, event AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\nORDER BY 1;"
+          },
+          "version": "v0"
+        },
+        "refresh": "onTimeRangeChanged",
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": "alphabeticalAsc"
+      }
+    },
+    {
+      "kind": "TextVariable",
+      "spec": {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": "dontHide",
+        "label": "payload_search",
+        "name": "payload_search",
+        "query": "",
+        "skipUrlSync": false
+      }
+    },
+    {
+      "kind": "QueryVariable",
+      "spec": {
+        "allowCustomValue": true,
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "definition": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event,\n    left(COALESCE(w.body_text, '[binary payload]'), 80) AS payload_preview\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n)\nSELECT CONCAT(to_char(received_at, 'YYYY-MM-DD HH24:MI:SS TZ'), ' | ', tenant, ' | ', app, ' | ', event, ' | ', left(path, 60)) AS __text, id::text AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\n  AND ('${event}' = '__all' OR event = '${event}')\n  AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(payload_preview, '') ILIKE '%' || '${payload_search}' || '%')\nORDER BY received_at DESC\nLIMIT 200;",
+        "hide": "dontHide",
+        "includeAll": false,
+        "label": "webhook_id",
+        "multi": false,
+        "name": "webhook_id",
+        "options": [],
+        "query": {
+          "datasource": {
+            "name": "$datasource"
+          },
+          "group": "postgres",
+          "kind": "DataQuery",
+          "spec": {
+            "__legacyStringValue": "WITH enriched AS (\n  SELECT\n    w.id,\n    w.received_at,\n    w.path,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 1), ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 2), ''), 'unknown') AS app,\n    COALESCE(NULLIF(split_part(regexp_replace(w.path, '^/api/webhooks/?', ''), '/', 3), ''), 'unknown') AS event,\n    left(COALESCE(w.body_text, '[binary payload]'), 80) AS payload_preview\n  FROM incoming_webhooks w\n  WHERE $__timeFilter(w.received_at)\n)\nSELECT CONCAT(to_char(received_at, 'YYYY-MM-DD HH24:MI:SS TZ'), ' | ', tenant, ' | ', app, ' | ', event, ' | ', left(path, 60)) AS __text, id::text AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\n  AND ('${event}' = '__all' OR event = '${event}')\n  AND ('${payload_search}' = '' OR path ILIKE '%' || '${payload_search}' || '%' OR COALESCE(payload_preview, '') ILIKE '%' || '${payload_search}' || '%')\nORDER BY received_at DESC\nLIMIT 200;"
+          },
+          "version": "v0"
+        },
+        "refresh": "onTimeRangeChanged",
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": "disabled"
+      }
+    }
+  ]
+}
