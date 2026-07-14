@@ -134,7 +134,11 @@ async fn main() {
         default_ttl_seconds,
     });
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(3000);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind tcp listener");
