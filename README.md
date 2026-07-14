@@ -84,3 +84,29 @@ make k6-smoke
 The table is auto-created on startup:
 
 `incoming_webhooks`
+
+## Grafana dashboards
+
+Grafana is provisioned in [db.docker-compose.yml](/home/rshaut/projects/rust-webhooks/db.docker-compose.yml) with a Postgres datasource and three dashboards:
+
+- `Webhook Overview`: throughput, top tenants, top apps, event mix, and a recent payload explorer table.
+- `Webhook Dimensions Catalog`: all distinct tenants, apps, events, and tenant/app/event combinations present in the database.
+- `Webhook Payload Detail`: request metadata plus full headers, query params, and payload body for a selected webhook ID.
+
+Start the database, Adminer, and Grafana:
+
+```bash
+docker compose -f db.docker-compose.yml up -d
+```
+
+Open Grafana at `http://localhost:3000` and sign in with the default local credentials (`admin` / `admin` unless you override them). The dashboards are auto-loaded from [grafana/dashboards](/home/rshaut/projects/rust-webhooks/grafana/dashboards).
+
+The overview dashboard derives backend dimensions from the webhook path only:
+
+- `tenant`: first segment after `/api/webhooks`.
+- `app`: second segment after `/api/webhooks`.
+- `event`: third segment after `/api/webhooks`.
+- `tenant`, `app`, `event` variables filter to one path-derived value or `All`.
+- `payload_search`: optional free-text filter against request path and UTF-8 body text.
+
+Expected path shape for monitoring is `/api/webhooks/{tenant}/{app}/{event}/...`.

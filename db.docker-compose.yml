@@ -2,6 +2,8 @@ services:
 
   db:
     image: postgres
+    container_name: postgres
+    hostname: postgres
     restart: always
     # set shared memory limit when using docker compose
     shm_size: 128mb
@@ -23,3 +25,14 @@ services:
     restart: always
     ports:
       - 8080:8080
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    restart: always
+    depends_on:
+      - db
+    ports:
+      - 3000:3000
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

@@ -1,7 +1,7 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000';
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:3001';
 const VUS = Number(__ENV.VUS || 10);
 const DURATION = __ENV.DURATION || '30s';
 

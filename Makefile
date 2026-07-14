@@ -15,7 +15,7 @@ k6:
 		--network host \
 		-v "$$(pwd):/work" \
 		-w /work \
-		-e BASE_URL="$${BASE_URL:-http://127.0.0.1:3000}" \
+		-e BASE_URL="$${BASE_URL:-http://172.17.0.1:3001}" \
 		-e VUS="$${VUS:-10}" \
 		-e DURATION="$${DURATION:-30s}" \
 		-e RUN_ID="$${RUN_ID:-local}" \
@@ -26,8 +26,19 @@ k6-smoke:
 		--network host \
 		-v "$$(pwd):/work" \
 		-w /work \
-		-e BASE_URL="$${BASE_URL:-http://127.0.0.1:3000}" \
+		-e BASE_URL="$${BASE_URL:-http://172.17.0.1:3001}" \
 		-e VUS="100" \
 		-e DURATION="60s" \
 		-e RUN_ID="$${RUN_ID:-smoke}" \
+		grafana/k6 run k6/webhooks-load.js
+
+k6-smoke-10k:
+	docker run --rm -i \
+		--network host \
+		-v "$$(pwd):/work" \
+		-w /work \
+		-e BASE_URL="$${BASE_URL:-http://172.17.0.1:3001}" \
+		-e VUS="10000" \
+		-e DURATION="60s" \
+		-e RUN_ID="$${RUN_ID:-smoke-10k}" \
 		grafana/k6 run k6/webhooks-load.js

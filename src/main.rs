@@ -58,7 +58,7 @@ async fn main() {
         .route("/api/webhooks/{*rest}", any(capture_webhook))
         .with_state(AppState { db, sensitive_headers, sensitive_query_keys });
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind tcp listener");
