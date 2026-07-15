@@ -1,6 +1,10 @@
 # rust-webhooks
 
+[![CI](https://github.com/ryanshaut/rust-webhooks/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryanshaut/rust-webhooks/actions/workflows/ci.yml)
+
 A simple Rust webhook catcher API.
+
+Container images are published to `ghcr.io/ryanshaut/rust-webhooks`.
 
 ## What it does
 
@@ -51,6 +55,18 @@ Patterns supported:
 
 ```bash
 cargo run
+```
+
+## Quick start with published image
+
+```bash
+docker run --rm -p 3000:3000 \
+  -e DB_USERNAME=postgres \
+  -e DB_PASSWORD=postgres \
+  -e DB_HOST=host.docker.internal \
+  -e DB_PORT=5432 \
+  -e DB_DATABASE=webhooks \
+  ghcr.io/ryanshaut/rust-webhooks:latest
 ```
 
 ## Test with curl
