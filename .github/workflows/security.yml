@@ -45,8 +45,6 @@ jobs:
           push: false
           load: true
           tags: local/rust-webhooks:scan
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
