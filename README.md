@@ -166,6 +166,28 @@ Read-only operator summary endpoint. Returns aggregate counts across lifecycle s
 
 Read-only operator endpoint that returns the lifecycle status for a specific webhook ID (the ID returned when the webhook was accepted).
 
+- `GET /api/operator/active-webhooks`
+
+Read-only operator endpoint for orchestration (for example, Airflow). Returns all active webhook streams grouped by `tenant/app/event` with counts for:
+
+- `pending_new`: active webhooks that have not been claimed yet (`status = new`)
+- `in_flight_received`: active webhooks currently claimed by consumers (`status = received`)
+- `total_active`: total active webhooks in the stream
+
+Only streams with at least one `pending_new` webhook are returned.
+
+Optional query filters:
+
+- `tenant`: return only streams for a tenant
+- `tenant` + `app`: return only streams for a specific tenant/app pair
+
+Examples:
+
+- `/api/operator/active-webhooks?tenant=shopify`
+- `/api/operator/active-webhooks?tenant=shopify&app=orders`
+
+If `app` is provided without `tenant`, the endpoint returns `400 Bad Request`.
+
 ## Grafana dashboards
 
 Grafana is provisioned in [db.docker-compose.yml](/home/rshaut/projects/rust-webhooks/db.docker-compose.yml) with a Postgres datasource and three dashboards:

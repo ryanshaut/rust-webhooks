@@ -41,6 +41,12 @@ struct TtlQueryParams {
 }
 
 #[derive(Deserialize)]
+struct ActiveWebhookFilters {
+    tenant: Option<String>,
+    app: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct CompleteWebhookRequest {
     outcome: String,
     substatus: Option<String>,
@@ -101,6 +107,16 @@ struct OperatorWebhookStatusResponse {
     active: bool,
     substatus: Option<String>,
     ttl_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, FromRow)]
+struct OperatorActiveWebhookStreamResponse {
+    tenant: String,
+    app: String,
+    event: String,
+    pending_new: i64,
+    in_flight_received: i64,
+    total_active: i64,
 }
 
 #[tokio::main]
@@ -173,6 +189,10 @@ fn build_app(state: AppState) -> Router {
             post(check_in_webhook),
         )
         .route("/api/operator/status", get(operator_status))
+        .route(
+            "/api/operator/active-webhooks",
+            get(operator_active_webhooks),
+        )
         .route(
             "/api/operator/webhooks/{id}/status",
             get(operator_webhook_status),
@@ -531,6 +551,62 @@ async fn operator_webhook_status(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": "failed to fetch webhook status" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn operator_active_webhooks(
+    State(state): State<AppState>,
+    Query(filters): Query<ActiveWebhookFilters>,
+) -> Response {
+    let ActiveWebhookFilters { tenant, app } = filters;
+
+    if tenant.is_none() && app.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "tenant is required when app is provided"
+            })),
+        )
+            .into_response();
+    }
+
+    let active_webhooks = sqlx::query_as::<_, OperatorActiveWebhookStreamResponse>(
+        r#"
+        SELECT
+            tenant,
+            app,
+            event,
+            COUNT(*) FILTER (WHERE status = 'new') AS pending_new,
+            COUNT(*) FILTER (WHERE status = 'received') AS in_flight_received,
+            COUNT(*) AS total_active
+        FROM incoming_webhooks
+        WHERE active = TRUE
+          AND status IN ('new', 'received')
+          AND tenant IS NOT NULL
+          AND app IS NOT NULL
+          AND event IS NOT NULL
+                    AND ($1::text IS NULL OR tenant = $1)
+                    AND ($2::text IS NULL OR app = $2)
+        GROUP BY tenant, app, event
+        HAVING COUNT(*) FILTER (WHERE status = 'new') > 0
+        ORDER BY tenant ASC, app ASC, event ASC
+        "#,
+    )
+        .bind(tenant)
+        .bind(app)
+    .fetch_all(&state.db)
+    .await;
+
+    match active_webhooks {
+        Ok(records) => (StatusCode::OK, Json(records)).into_response(),
+        Err(err) => {
+            eprintln!("failed to fetch active webhooks: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to fetch active webhooks" })),
             )
                 .into_response()
         }
@@ -1019,6 +1095,32 @@ mod tests {
         let request = Request::builder()
             .method(Method::GET)
             .uri("/api/operator/webhooks/not-a-uuid/status")
+            .body(Body::empty())
+            .expect("request should build");
+
+        let response = app.oneshot(request).await.expect("response should be returned");
+        assert_eq!(response.status(), HttpStatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn operator_active_webhooks_rejects_post_method() {
+        let app = test_app();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/operator/active-webhooks")
+            .body(Body::empty())
+            .expect("request should build");
+
+        let response = app.oneshot(request).await.expect("response should be returned");
+        assert_eq!(response.status(), HttpStatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn operator_active_webhooks_rejects_app_filter_without_tenant() {
+        let app = test_app();
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/operator/active-webhooks?app=orders")
             .body(Body::empty())
             .expect("request should build");
 
