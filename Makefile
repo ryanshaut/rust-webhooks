@@ -1,6 +1,9 @@
 
 .PHONY: build run debug test k6 k6-smoke
 
+setup:
+	curl https://sh.rustup.rs -sSf | sh
+
 build:
 	cargo build --release
 
