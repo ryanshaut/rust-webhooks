@@ -50,6 +50,14 @@ struct ActiveWebhookFilters {
 struct CompleteWebhookRequest {
     outcome: String,
     substatus: Option<String>,
+    result: Option<Value>,
+    extra_properties: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct CheckInRequest {
+    status_text: Option<String>,
+    intermediate_status: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -69,6 +77,10 @@ struct StoredWebhookRecord {
     active: bool,
     substatus: Option<String>,
     ttl_expires_at: Option<DateTime<Utc>>,
+    intermediate_status: Option<String>,
+    status_text: Option<String>,
+    result: Option<Value>,
+    extra_properties: Option<Value>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -77,6 +89,8 @@ struct CompletionResponse {
     status: String,
     active: bool,
     substatus: Option<String>,
+    result: Option<Value>,
+    extra_properties: Option<Value>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -84,6 +98,8 @@ struct CheckInResponse {
     id: Uuid,
     status: String,
     ttl_expires_at: DateTime<Utc>,
+    intermediate_status: Option<String>,
+    status_text: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -107,6 +123,10 @@ struct OperatorWebhookStatusResponse {
     active: bool,
     substatus: Option<String>,
     ttl_expires_at: Option<DateTime<Utc>>,
+    intermediate_status: Option<String>,
+    status_text: Option<String>,
+    result: Option<Value>,
+    extra_properties: Option<Value>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -242,6 +262,18 @@ async fn ensure_schema(db: &PgPool) -> Result<(), sqlx::Error> {
 
     sqlx::query(
         r#"
+        ALTER TABLE incoming_webhooks
+            ADD COLUMN IF NOT EXISTS intermediate_status TEXT,
+            ADD COLUMN IF NOT EXISTS status_text TEXT,
+            ADD COLUMN IF NOT EXISTS result JSONB,
+            ADD COLUMN IF NOT EXISTS extra_properties JSONB;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
         CREATE INDEX IF NOT EXISTS idx_incoming_webhooks_consumer_lookup
         ON incoming_webhooks (tenant, app, event, status, active, received_at);
         "#,
@@ -313,9 +345,13 @@ async fn capture_webhook(
             status,
             active,
             substatus,
-            ttl_expires_at
+            ttl_expires_at,
+            intermediate_status,
+            status_text,
+            result,
+            extra_properties
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'new', TRUE, NULL, NULL)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'new', TRUE, NULL, NULL, NULL, NULL, NULL, NULL)
         "#,
     )
     .bind(id)
@@ -405,17 +441,42 @@ async fn complete_webhook(
         request.substatus
     };
 
+    let result = match &request.result {
+        Some(v) if !v.is_object() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "result must be a JSON object" })),
+            )
+                .into_response();
+        }
+        other => other.clone(),
+    };
+
+    let extra_properties = match &request.extra_properties {
+        Some(v) if !v.is_object() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "extra_properties must be a JSON object" })),
+            )
+                .into_response();
+        }
+        other => other.clone(),
+    };
+
     let updated = sqlx::query_as::<_, CompletionResponse>(
         r#"
         UPDATE incoming_webhooks
-        SET status = $2, active = FALSE, substatus = $3, ttl_expires_at = NULL
+        SET status = $2, active = FALSE, substatus = $3, ttl_expires_at = NULL,
+            result = $4, extra_properties = $5
         WHERE id = $1 AND status = 'received' AND active = TRUE
-        RETURNING id, status, active, substatus
+        RETURNING id, status, active, substatus, result, extra_properties
         "#,
     )
     .bind(id)
     .bind(outcome)
     .bind(final_substatus)
+    .bind(result)
+    .bind(extra_properties)
     .fetch_optional(&state.db)
     .await;
 
@@ -443,6 +504,7 @@ async fn check_in_webhook(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Query(ttl_query): Query<TtlQueryParams>,
+    body: Option<Json<CheckInRequest>>,
 ) -> Response {
     if let Err(response) = expire_stale_claims(&state.db).await {
         return response;
@@ -453,16 +515,25 @@ async fn check_in_webhook(
         Err(response) => return response,
     };
 
+    let (status_text, intermediate_status) = match body {
+        Some(Json(req)) => (req.status_text, req.intermediate_status),
+        None => (None, None),
+    };
+
     let updated = sqlx::query_as::<_, CheckInResponse>(
         r#"
         UPDATE incoming_webhooks
-        SET ttl_expires_at = NOW() + ($2::bigint * INTERVAL '1 second')
+        SET ttl_expires_at = NOW() + ($2::bigint * INTERVAL '1 second'),
+            status_text = COALESCE($3, status_text),
+            intermediate_status = COALESCE($4, intermediate_status)
         WHERE id = $1 AND status = 'received' AND active = TRUE
-        RETURNING id, status, ttl_expires_at
+        RETURNING id, status, ttl_expires_at, intermediate_status, status_text
         "#,
     )
     .bind(id)
     .bind(ttl_seconds)
+    .bind(status_text)
+    .bind(intermediate_status)
     .fetch_optional(&state.db)
     .await;
 
@@ -530,7 +601,11 @@ async fn operator_webhook_status(
             status,
             active,
             substatus,
-            ttl_expires_at
+            ttl_expires_at,
+            intermediate_status,
+            status_text,
+            result,
+            extra_properties
         FROM incoming_webhooks
         WHERE id = $1
         "#,
@@ -640,7 +715,11 @@ async fn peek_webhook(
             status,
             active,
             substatus,
-            ttl_expires_at
+            ttl_expires_at,
+            intermediate_status,
+            status_text,
+            result,
+            extra_properties
         FROM incoming_webhooks
         WHERE tenant = $1
           AND app = $2
@@ -721,7 +800,11 @@ async fn receive_webhook(
             webhook.status,
             webhook.active,
             webhook.substatus,
-            webhook.ttl_expires_at
+            webhook.ttl_expires_at,
+            webhook.intermediate_status,
+            webhook.status_text,
+            webhook.result,
+            webhook.extra_properties
         "#,
     )
     .bind(tenant)
