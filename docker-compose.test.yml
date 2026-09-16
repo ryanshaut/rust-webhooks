@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rust-webhooks
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rust-webhooks"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  rust-test:
+    image: rust:1-bookworm
+    working_dir: /app
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/app/target
+    environment:
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: rust-webhooks
+      DEFAULT_RECEIVE_TTL_SECONDS: 300
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: cargo test --locked
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  cargo-target:
