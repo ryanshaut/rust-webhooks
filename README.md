@@ -128,6 +128,10 @@ If the consumer never completes it before TTL expiration, it is marked:
 
 Returns the next pending (`new`) webhook without claiming it.
 
+- `GET /api/consumer/peek/{tenant}/{app}/{event}/{id}`
+
+Returns the complete webhook identified by `id` within the topic (`tenant/app/event`), regardless of lifecycle state. This read does not claim the webhook, extend its TTL, or expire any stale claims.
+
 - `POST /api/consumer/receive/{tenant}/{app}?ttl_seconds=300`
 - `POST /api/consumer/receive/{tenant}/{app}/{event}?ttl_seconds=300`
 

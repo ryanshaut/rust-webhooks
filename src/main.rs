@@ -195,6 +195,10 @@ fn build_app(state: AppState) -> Router {
             "/api/consumer/peek/{tenant}/{app}/{event}",
             get(peek_webhook_tenant_app_event),
         )
+        .route(
+            "/api/consumer/peek/{tenant}/{app}/{event}/{id}",
+            get(peek_webhook_by_id),
+        )
         .route("/api/consumer/receive/{tenant}/{app}", post(receive_webhook_tenant_app))
         .route(
             "/api/consumer/receive/{tenant}/{app}/{event}",
@@ -397,6 +401,64 @@ async fn peek_webhook_tenant_app_event(
     Path((tenant, app, event)): Path<(String, String, String)>,
 ) -> Response {
     peek_webhook(&state, &tenant, &app, Some(&event)).await
+}
+
+async fn peek_webhook_by_id(
+    State(state): State<AppState>,
+    Path((tenant, app, event, id)): Path<(String, String, String, Uuid)>,
+) -> Response {
+    let webhook = sqlx::query_as::<_, StoredWebhookRecord>(
+        r#"
+        SELECT
+            id,
+            received_at,
+            method,
+            path,
+            tenant,
+            app,
+            event,
+            query_params,
+            headers,
+            body_text,
+            body_base64,
+            status,
+            active,
+            substatus,
+            ttl_expires_at,
+            intermediate_status,
+            status_text,
+            result,
+            extra_properties
+        FROM incoming_webhooks
+        WHERE id = $1
+          AND tenant = $2
+          AND app = $3
+          AND event = $4
+        "#,
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(app)
+    .bind(event)
+    .fetch_optional(&state.db)
+    .await;
+
+    match webhook {
+        Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "webhook not found for topic" })),
+        )
+            .into_response(),
+        Err(err) => {
+            eprintln!("failed to peek webhook {id}: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to peek webhook" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn receive_webhook_tenant_app(

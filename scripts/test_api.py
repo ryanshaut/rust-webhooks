@@ -49,6 +49,12 @@ class WebhookApiTests(unittest.TestCase):
     def status_url(self, webhook_id):
         return f"{BASE_URL}/api/operator/webhooks/{webhook_id}/status"
 
+    def peek_by_id_url(self, webhook_id, tenant=None, app=None, event=None):
+        return (
+            f"{BASE_URL}/api/consumer/peek/"
+            f"{tenant or self.tenant}/{app or self.app}/{event or self.event}/{webhook_id}"
+        )
+
     def send(self, tenant=None, app=None, event=None, **kwargs):
         return self.session.post(
             self.webhook_url(tenant or self.tenant, app or self.app, event or self.event),
@@ -114,6 +120,44 @@ class WebhookApiTests(unittest.TestCase):
         )
         self.assertEqual(next_receive.status_code, 200)
         self.assertEqual(next_receive.json()["id"], second)
+
+    def test_peek_by_id_returns_full_record_without_changing_lifecycle_state(self):
+        webhook_id = self.send(data=b"peek-by-id").json()["id"]
+
+        new_peek = self.session.get(self.peek_by_id_url(webhook_id), timeout=5)
+        self.assertEqual(new_peek.status_code, 200)
+        self.assertEqual(new_peek.json()["body_text"], "peek-by-id")
+        self.assertEqual(new_peek.json()["status"], "new")
+        self.assertTrue(new_peek.json()["active"])
+
+        receive = self.session.post(
+            f"{BASE_URL}/api/consumer/receive/{self.tenant}/{self.app}/{self.event}",
+            params={"ttl_seconds": 30},
+            timeout=5,
+        )
+        self.assertEqual(receive.status_code, 200)
+
+        received_peek = self.session.get(self.peek_by_id_url(webhook_id), timeout=5)
+        self.assertEqual(received_peek.status_code, 200)
+        self.assertEqual(received_peek.json()["status"], "received")
+        self.assertTrue(received_peek.json()["active"])
+
+        complete = self.session.post(
+            f"{BASE_URL}/api/consumer/webhooks/{webhook_id}/complete",
+            json={"outcome": "success"},
+            timeout=5,
+        )
+        self.assertEqual(complete.status_code, 200)
+
+        completed_peek = self.session.get(self.peek_by_id_url(webhook_id), timeout=5)
+        self.assertEqual(completed_peek.status_code, 200)
+        self.assertEqual(completed_peek.json()["status"], "success")
+        self.assertFalse(completed_peek.json()["active"])
+
+        wrong_topic = self.session.get(
+            self.peek_by_id_url(webhook_id, event="wrong-event"), timeout=5
+        )
+        self.assertEqual(wrong_topic.status_code, 404)
 
     def test_active_streams_and_filters_report_pending_and_in_flight_counts(self):
         received_id = self.send(data=b"in-flight").json()["id"]
@@ -250,6 +294,11 @@ class WebhookApiTests(unittest.TestCase):
         self.assertEqual(status.json()["status"], "expired")
         self.assertFalse(status.json()["active"])
         self.assertEqual(status.json()["substatus"], "retry-ttl")
+
+        expired_peek = self.session.get(self.peek_by_id_url(webhook_id), timeout=5)
+        self.assertEqual(expired_peek.status_code, 200)
+        self.assertEqual(expired_peek.json()["status"], "expired")
+        self.assertFalse(expired_peek.json()["active"])
 
         complete = self.session.post(
             f"{BASE_URL}/api/consumer/webhooks/{webhook_id}/complete",
