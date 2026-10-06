@@ -1,6 +1,9 @@
 use axum::{
     body::Bytes,
-    extract::{OriginalUri, Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        OriginalUri, Path, Query, State,
+    },
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -11,7 +14,14 @@ use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
-use std::{collections::HashMap, env, net::SocketAddr};
+use std::{
+    collections::HashMap,
+    env,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::{watch, RwLock};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -20,6 +30,72 @@ struct AppState {
     sensitive_headers: SensitiveKeysConfig,
     sensitive_query_keys: SensitiveKeysConfig,
     default_ttl_seconds: i64,
+    subscriptions: Arc<WebsocketSubscriptions>,
+    webhooks_changed: watch::Sender<()>,
+}
+
+#[derive(Clone, Debug)]
+struct WebhookTopic {
+    tenant: String,
+    app: String,
+    event: Option<String>,
+}
+
+impl WebhookTopic {
+    fn overlaps(&self, other: &Self) -> bool {
+        self.tenant == other.tenant
+            && self.app == other.app
+            && (self.event.is_none() || other.event.is_none() || self.event == other.event)
+    }
+}
+
+#[derive(Default)]
+struct WebsocketSubscriptions {
+    topics: Mutex<HashMap<Uuid, WebhookTopic>>,
+    // HTTP claims hold a read lock so registration cannot race a claim.
+    receive_gate: RwLock<()>,
+}
+
+impl WebsocketSubscriptions {
+    fn conflicts(&self, topic: &WebhookTopic) -> bool {
+        self.topics
+            .lock()
+            .unwrap()
+            .values()
+            .any(|existing| existing.overlaps(topic))
+    }
+
+    fn register(self: &Arc<Self>, topic: WebhookTopic) -> Result<WebsocketSubscription, ()> {
+        let mut topics = self.topics.lock().unwrap();
+        if topics.values().any(|existing| existing.overlaps(&topic)) {
+            return Err(());
+        }
+        let id = Uuid::new_v4();
+        topics.insert(id, topic);
+        Ok(WebsocketSubscription {
+            registry: self.clone(),
+            id,
+        })
+    }
+}
+
+struct WebsocketSubscription {
+    registry: Arc<WebsocketSubscriptions>,
+    id: Uuid,
+}
+
+impl Drop for WebsocketSubscription {
+    fn drop(&mut self) {
+        self.registry.topics.lock().unwrap().remove(&self.id);
+    }
+}
+
+fn subscription_conflict() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": "an overlapping WebSocket receive subscription is active" })),
+    )
+        .into_response()
 }
 
 #[derive(Clone)]
@@ -155,8 +231,10 @@ async fn main() {
         .await
         .expect("failed to ensure database schema");
 
-    let sensitive_headers = load_sensitive_keys_config("SENSITIVE_HEADERS", DEFAULT_SENSITIVE_HEADERS);
-    let sensitive_query_keys = load_sensitive_keys_config("SENSITIVE_QUERY_KEYS", DEFAULT_SENSITIVE_QUERY_KEYS);
+    let sensitive_headers =
+        load_sensitive_keys_config("SENSITIVE_HEADERS", DEFAULT_SENSITIVE_HEADERS);
+    let sensitive_query_keys =
+        load_sensitive_keys_config("SENSITIVE_QUERY_KEYS", DEFAULT_SENSITIVE_QUERY_KEYS);
     let default_ttl_seconds = env::var("DEFAULT_RECEIVE_TTL_SECONDS")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
@@ -168,6 +246,8 @@ async fn main() {
         sensitive_headers,
         sensitive_query_keys,
         default_ttl_seconds,
+        subscriptions: Arc::default(),
+        webhooks_changed: watch::channel(()).0,
     });
 
     let port = env::var("PORT")
@@ -181,24 +261,36 @@ async fn main() {
 
     println!("Webhook server listening on http://{}", addr);
 
-    axum::serve(listener, app)
-        .await
-        .expect("server failed");
+    axum::serve(listener, app).await.expect("server failed");
 }
 
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/api/webhooks", any(capture_webhook))
         .route("/api/webhooks/{*rest}", any(capture_webhook))
-        .route("/api/consumer/peek/{tenant}/{app}", get(peek_webhook_tenant_app))
+        .route(
+            "/api/consumer/peek/{tenant}/{app}",
+            get(peek_webhook_tenant_app),
+        )
         .route(
             "/api/consumer/peek/{tenant}/{app}/{event}",
             get(peek_webhook_tenant_app_event),
         )
-        .route("/api/consumer/receive/{tenant}/{app}", post(receive_webhook_tenant_app))
+        .route(
+            "/api/consumer/receive/{tenant}/{app}",
+            post(receive_webhook_tenant_app),
+        )
         .route(
             "/api/consumer/receive/{tenant}/{app}/{event}",
             post(receive_webhook_tenant_app_event),
+        )
+        .route(
+            "/api/consumer/ws/{tenant}/{app}",
+            get(websocket_receive_tenant_app),
+        )
+        .route(
+            "/api/consumer/ws/{tenant}/{app}/{event}",
+            get(websocket_receive_tenant_app_event),
         )
         .route(
             "/api/consumer/webhooks/{id}/complete",
@@ -369,11 +461,14 @@ async fn capture_webhook(
     .await;
 
     match insert_result {
-        Ok(_) => (
-            StatusCode::ACCEPTED,
-            Json(WebhookAcceptedResponse { id, received_at }),
-        )
-            .into_response(),
+        Ok(_) => {
+            state.webhooks_changed.send_replace(());
+            (
+                StatusCode::ACCEPTED,
+                Json(WebhookAcceptedResponse { id, received_at }),
+            )
+                .into_response()
+        }
         Err(err) => {
             eprintln!("failed to persist webhook: {err}");
             (
@@ -413,6 +508,133 @@ async fn receive_webhook_tenant_app_event(
     Query(ttl_query): Query<TtlQueryParams>,
 ) -> Response {
     receive_webhook(&state, &tenant, &app, Some(&event), ttl_query.ttl_seconds).await
+}
+
+async fn websocket_receive_tenant_app(
+    State(state): State<AppState>,
+    Path((tenant, app)): Path<(String, String)>,
+    Query(ttl_query): Query<TtlQueryParams>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    websocket_receive(
+        state,
+        WebhookTopic {
+            tenant,
+            app,
+            event: None,
+        },
+        ttl_query,
+        upgrade,
+    )
+    .await
+}
+
+async fn websocket_receive_tenant_app_event(
+    State(state): State<AppState>,
+    Path((tenant, app, event)): Path<(String, String, String)>,
+    Query(ttl_query): Query<TtlQueryParams>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    websocket_receive(
+        state,
+        WebhookTopic {
+            tenant,
+            app,
+            event: Some(event),
+        },
+        ttl_query,
+        upgrade,
+    )
+    .await
+}
+
+async fn websocket_receive(
+    state: AppState,
+    topic: WebhookTopic,
+    ttl_query: TtlQueryParams,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let ttl_seconds = match resolve_ttl_seconds(ttl_query.ttl_seconds, state.default_ttl_seconds) {
+        Ok(ttl) => ttl,
+        Err(response) => return response,
+    };
+    let gate = state.subscriptions.receive_gate.write().await;
+    let subscription = match state.subscriptions.register(topic.clone()) {
+        Ok(subscription) => subscription,
+        Err(()) => return subscription_conflict(),
+    };
+    let changes = state.webhooks_changed.subscribe();
+    drop(gate);
+    upgrade
+        .max_message_size(1024)
+        .max_frame_size(1024)
+        .on_upgrade(move |socket| {
+            websocket_receive_loop(socket, state, topic, ttl_seconds, changes, subscription)
+        })
+}
+
+async fn websocket_receive_loop(
+    mut socket: WebSocket,
+    state: AppState,
+    topic: WebhookTopic,
+    ttl_seconds: i64,
+    mut changes: watch::Receiver<()>,
+    _subscription: WebsocketSubscription,
+) {
+    let mut pending = true;
+    let mut claim = Box::pin(claim_webhook(
+        &state,
+        &topic.tenant,
+        &topic.app,
+        topic.event.as_deref(),
+        Some(ttl_seconds),
+    ));
+    loop {
+        let message = tokio::select! {
+            biased;
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Ping(payload))) => Message::Pong(payload),
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                _ => continue,
+            },
+            claimed = &mut claim, if pending => {
+                match claimed {
+                    Ok(Some(webhook)) => {
+                        claim = Box::pin(claim_webhook(
+                            &state, &topic.tenant, &topic.app, topic.event.as_deref(), Some(ttl_seconds),
+                        ));
+                        Message::Text(serde_json::to_string(&webhook).unwrap().into())
+                    }
+                    Ok(None) => {
+                        pending = false;
+                        continue;
+                    }
+                    Err(_) => {
+                        let _ = tokio::time::timeout(Duration::from_secs(10), socket.send(Message::Text(
+                            serde_json::json!({ "error": "failed to receive webhook" }).to_string().into(),
+                        ))).await;
+                        break;
+                    }
+                }
+            },
+            changed = changes.changed(), if !pending => {
+                if changed.is_err() {
+                    break;
+                }
+                claim = Box::pin(claim_webhook(
+                    &state, &topic.tenant, &topic.app, topic.event.as_deref(), Some(ttl_seconds),
+                ));
+                pending = true;
+                continue;
+            },
+        };
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(10), socket.send(message)).await,
+            Ok(Ok(()))
+        ) {
+            break;
+        }
+    }
 }
 
 async fn complete_webhook(
@@ -586,10 +808,7 @@ async fn operator_status(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn operator_webhook_status(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Response {
+async fn operator_webhook_status(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
     let webhook = sqlx::query_as::<_, OperatorWebhookStatusResponse>(
         r#"
         SELECT
@@ -670,8 +889,8 @@ async fn operator_active_webhooks(
         ORDER BY tenant ASC, app ASC, event ASC
         "#,
     )
-        .bind(tenant)
-        .bind(app)
+    .bind(tenant)
+    .bind(app)
     .fetch_all(&state.db)
     .await;
 
@@ -688,12 +907,7 @@ async fn operator_active_webhooks(
     }
 }
 
-async fn peek_webhook(
-    state: &AppState,
-    tenant: &str,
-    app: &str,
-    event: Option<&str>,
-) -> Response {
+async fn peek_webhook(state: &AppState, tenant: &str, app: &str, event: Option<&str>) -> Response {
     if let Err(response) = expire_stale_claims(&state.db).await {
         return response;
     }
@@ -757,14 +971,33 @@ async fn receive_webhook(
     event: Option<&str>,
     requested_ttl_seconds: Option<i64>,
 ) -> Response {
-    if let Err(response) = expire_stale_claims(&state.db).await {
-        return response;
-    }
-
-    let ttl_seconds = match resolve_ttl_seconds(requested_ttl_seconds, state.default_ttl_seconds) {
-        Ok(value) => value,
-        Err(response) => return response,
+    let _gate = state.subscriptions.receive_gate.read().await;
+    let topic = WebhookTopic {
+        tenant: tenant.to_string(),
+        app: app.to_string(),
+        event: event.map(str::to_string),
     };
+    if state.subscriptions.conflicts(&topic) {
+        return subscription_conflict();
+    }
+    match claim_webhook(state, tenant, app, event, requested_ttl_seconds).await {
+        Ok(Some(webhook)) => (StatusCode::OK, Json(webhook)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(response) => *response,
+    }
+}
+
+async fn claim_webhook(
+    state: &AppState,
+    tenant: &str,
+    app: &str,
+    event: Option<&str>,
+    requested_ttl_seconds: Option<i64>,
+) -> Result<Option<StoredWebhookRecord>, Box<Response>> {
+    expire_stale_claims(&state.db).await.map_err(Box::new)?;
+
+    let ttl_seconds =
+        resolve_ttl_seconds(requested_ttl_seconds, state.default_ttl_seconds).map_err(Box::new)?;
 
     let claimed = sqlx::query_as::<_, StoredWebhookRecord>(
         r#"
@@ -815,15 +1048,16 @@ async fn receive_webhook(
     .await;
 
     match claimed {
-        Ok(Some(webhook)) => (StatusCode::OK, Json(webhook)).into_response(),
-        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Ok(webhook) => Ok(webhook),
         Err(err) => {
             eprintln!("failed to receive webhook: {err}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "failed to receive webhook" })),
-            )
-                .into_response()
+            Err(Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "failed to receive webhook" })),
+                )
+                    .into_response(),
+            ))
         }
     }
 }
@@ -909,10 +1143,7 @@ fn headers_to_json(headers: &HeaderMap, config: &SensitiveKeysConfig) -> Value {
                     arr.push(Value::String(stored_value));
                 }
             } else {
-                map.insert(
-                    key,
-                    Value::Array(vec![Value::String(stored_value)]),
-                );
+                map.insert(key, Value::Array(vec![Value::String(stored_value)]));
             }
         }
     }
@@ -1055,19 +1286,18 @@ fn database_url_from_env() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::Method;
     use axum::{
         body::Body,
         http::{Request, StatusCode as HttpStatusCode},
     };
-    use axum::http::Method;
-    use sqlx::PgPool;
     use tower::ServiceExt;
 
-    fn test_app() -> Router {
+    fn test_state() -> AppState {
         let db = PgPool::connect_lazy("postgres://postgres@localhost/rust-webhooks")
             .expect("test db URL should parse");
 
-        let state = AppState {
+        AppState {
             db,
             sensitive_headers: SensitiveKeysConfig {
                 exact_matches: vec![],
@@ -1080,9 +1310,367 @@ mod tests {
                 suffix: vec![],
             },
             default_ttl_seconds: 300,
-        };
+            subscriptions: Arc::default(),
+            webhooks_changed: watch::channel(()).0,
+        }
+    }
 
-        build_app(state)
+    fn test_app() -> Router {
+        build_app(test_state())
+    }
+
+    fn topic(tenant: &str, app: &str, event: Option<&str>) -> WebhookTopic {
+        WebhookTopic {
+            tenant: tenant.to_string(),
+            app: app.to_string(),
+            event: event.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn websocket_topic_overlap_preserves_http_event_wildcard_semantics() {
+        let all_events = topic("tenant", "app", None);
+        let exact = topic("tenant", "app", Some("event"));
+        assert!(all_events.overlaps(&exact));
+        assert!(exact.overlaps(&all_events));
+        assert!(exact.overlaps(&exact));
+        assert!(all_events.overlaps(&all_events));
+        assert!(!exact.overlaps(&topic("other", "app", None)));
+        assert!(!exact.overlaps(&topic("tenant", "other", None)));
+        assert!(!exact.overlaps(&topic("tenant", "app", Some("other"))));
+    }
+
+    #[tokio::test]
+    async fn websocket_registration_is_atomic_and_released_on_drop() {
+        let registry = Arc::new(WebsocketSubscriptions::default());
+        let mut tasks = Vec::new();
+        for _ in 0..10 {
+            let registry = registry.clone();
+            tasks.push(tokio::spawn(async move {
+                registry.register(topic("tenant", "app", None)).ok()
+            }));
+        }
+        let mut subscriptions = Vec::new();
+        for task in tasks {
+            if let Some(subscription) = task.await.unwrap() {
+                subscriptions.push(subscription);
+            }
+        }
+        assert_eq!(subscriptions.len(), 1);
+        assert!(registry.conflicts(&topic("tenant", "app", Some("event"))));
+        drop(subscriptions);
+        assert!(!registry.conflicts(&topic("tenant", "app", None)));
+        assert!(registry.register(topic("tenant", "app", None)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn websocket_registration_waits_for_in_flight_http_receive() {
+        let registry = Arc::new(WebsocketSubscriptions::default());
+        let claim_guard = registry.receive_gate.read().await;
+        let subscriber_registry = registry.clone();
+        let mut registration = tokio::spawn(async move {
+            let _gate = subscriber_registry.receive_gate.write().await;
+            subscriber_registry
+                .register(topic("tenant", "app", None))
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut registration)
+                .await
+                .is_err()
+        );
+        assert!(!registry.conflicts(&topic("tenant", "app", None)));
+        drop(claim_guard);
+        let subscription = registration.await.unwrap();
+        assert!(registry.conflicts(&topic("tenant", "app", None)));
+        drop(subscription);
+    }
+
+    async fn start_test_server(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_app(state)).await.unwrap();
+        });
+        (format!("ws://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn websocket_conflicts_block_only_overlapping_receive_and_release_on_disconnect() {
+        let state = test_state();
+        let mut http_state = state.clone();
+        http_state.db = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://postgres@localhost/rust-webhooks")
+            .unwrap();
+        let app = build_app(http_state);
+        let (base, server) = start_test_server(state.clone()).await;
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/tenant/app/event"))
+                .await
+                .unwrap();
+
+        for scope in ["tenant/app/event", "tenant/app"] {
+            let error = tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/{scope}"))
+                .await
+                .unwrap_err();
+            match error {
+                tokio_tungstenite::tungstenite::Error::Http(response) => {
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                }
+                other => panic!("expected HTTP conflict, got {other}"),
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/consumer/receive/{scope}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        for path in [
+            "/api/consumer/peek/tenant/app",
+            "/api/consumer/peek/tenant/app/event",
+            "/api/consumer/receive/tenant/app/other",
+            "/api/consumer/receive/other/app/event",
+            "/api/consumer/receive/tenant/other/event",
+            "/api/operator/status",
+        ] {
+            let method = if path.contains("/receive/") {
+                Method::POST
+            } else {
+                Method::GET
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::CONFLICT, "{path}");
+        }
+
+        let (other, _) =
+            tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/tenant/app/other"))
+                .await
+                .unwrap();
+        drop(other);
+        socket.close(None).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.subscriptions.topics.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (mut replacement, _) =
+            tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/tenant/app"))
+                .await
+                .unwrap();
+        replacement.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_wildcard_blocks_exact_receive_and_invalid_ttl_does_not_reserve_topic() {
+        let state = test_state();
+        let (base, server) = start_test_server(state.clone()).await;
+        let error = tokio_tungstenite::connect_async(format!(
+            "{base}/api/consumer/ws/tenant/app?ttl_seconds=0"
+        ))
+        .await
+        .unwrap_err();
+        match error {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+            other => panic!("expected invalid TTL, got {other}"),
+        }
+        assert!(state.subscriptions.topics.lock().unwrap().is_empty());
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/tenant/app"))
+                .await
+                .unwrap();
+        for scope in ["tenant/app", "tenant/app/first", "tenant/app/second"] {
+            let response = build_app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/consumer/receive/{scope}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let error = tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/{scope}"))
+                .await
+                .unwrap_err();
+            match error {
+                tokio_tungstenite::tungstenite::Error::Http(response) => {
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                }
+                other => panic!("expected HTTP conflict, got {other}"),
+            }
+        }
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a PostgreSQL database in TEST_DATABASE_URL"]
+    async fn websocket_delivers_backlog_and_new_webhooks_with_http_receive_lifecycle() {
+        use futures_util::StreamExt;
+
+        let mut state = test_state();
+        state.db = PgPool::connect(&env::var("TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        ensure_schema(&state.db).await.unwrap();
+        let app = build_app(state.clone());
+        let (base, server) = start_test_server(state.clone()).await;
+
+        for event_scope in [None, Some("first")] {
+            let tenant = Uuid::new_v4().to_string();
+            let capture = |event: &str| {
+                app.clone().oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/webhooks/{tenant}/app/{event}"))
+                        .body(Body::from("payload"))
+                        .unwrap(),
+                )
+            };
+            assert_eq!(
+                capture("first").await.unwrap().status(),
+                StatusCode::ACCEPTED
+            );
+            let scope = match event_scope {
+                Some(event) => format!("{tenant}/app/{event}"),
+                None => format!("{tenant}/app"),
+            };
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/api/consumer/ws/{scope}?ttl_seconds=45"
+            ))
+            .await
+            .unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let backlog: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(backlog["event"], "first");
+            assert_eq!(backlog["status"], "received");
+            assert_eq!(backlog["body_text"], "payload");
+            let expires_at =
+                DateTime::parse_from_rfc3339(backlog["ttl_expires_at"].as_str().unwrap()).unwrap();
+            assert!((expires_at.with_timezone(&Utc) - Utc::now()).num_seconds() > 40);
+
+            assert_eq!(
+                capture("second").await.unwrap().status(),
+                StatusCode::ACCEPTED
+            );
+            if event_scope.is_some() {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), socket.next())
+                        .await
+                        .is_err()
+                );
+                let peek = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/api/consumer/peek/{tenant}/app/second"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(peek.status(), StatusCode::OK);
+                assert_eq!(
+                    capture("first").await.unwrap().status(),
+                    StatusCode::ACCEPTED
+                );
+            }
+            let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let delivered: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(delivered["event"], event_scope.unwrap_or("second"));
+            assert_eq!(delivered["status"], "received");
+            assert_ne!(delivered["id"], backlog["id"]);
+
+            let id = backlog["id"].as_str().unwrap();
+            let check_in = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!(
+                            "/api/consumer/webhooks/{id}/check-in?ttl_seconds=60"
+                        ))
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(check_in.status(), StatusCode::OK);
+            let complete = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/consumer/webhooks/{id}/complete"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"outcome":"success"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(complete.status(), StatusCode::OK);
+
+            socket.close(None).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while state.subscriptions.conflicts(&topic(&tenant, "app", None)) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/consumer/receive/{scope}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            sqlx::query("DELETE FROM incoming_webhooks WHERE tenant = $1")
+                .bind(&tenant)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        server.abort();
     }
 
     #[test]
@@ -1168,7 +1756,10 @@ mod tests {
             .body(Body::empty())
             .expect("request should build");
 
-        let response = app.oneshot(request).await.expect("response should be returned");
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("response should be returned");
         assert_eq!(response.status(), HttpStatusCode::METHOD_NOT_ALLOWED);
     }
 
@@ -1181,7 +1772,10 @@ mod tests {
             .body(Body::empty())
             .expect("request should build");
 
-        let response = app.oneshot(request).await.expect("response should be returned");
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("response should be returned");
         assert_eq!(response.status(), HttpStatusCode::BAD_REQUEST);
     }
 
@@ -1194,7 +1788,10 @@ mod tests {
             .body(Body::empty())
             .expect("request should build");
 
-        let response = app.oneshot(request).await.expect("response should be returned");
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("response should be returned");
         assert_eq!(response.status(), HttpStatusCode::METHOD_NOT_ALLOWED);
     }
 
@@ -1207,7 +1804,10 @@ mod tests {
             .body(Body::empty())
             .expect("request should build");
 
-        let response = app.oneshot(request).await.expect("response should be returned");
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("response should be returned");
         assert_eq!(response.status(), HttpStatusCode::BAD_REQUEST);
     }
 
@@ -1220,7 +1820,10 @@ mod tests {
             .body(Body::empty())
             .expect("request should build");
 
-        let response = app.oneshot(request).await.expect("response should be returned");
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("response should be returned");
         assert_eq!(response.status(), HttpStatusCode::METHOD_NOT_ALLOWED);
     }
 }

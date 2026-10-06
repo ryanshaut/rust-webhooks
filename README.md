@@ -133,6 +133,47 @@ Returns the next pending (`new`) webhook without claiming it.
 
 Claims and returns the next pending webhook, moving it to `received` with TTL. If `ttl_seconds` is omitted, `DEFAULT_RECEIVE_TTL_SECONDS` is used.
 
+### WebSocket receive
+
+- `GET /api/consumer/ws/{tenant}/{app}?ttl_seconds=300` (WebSocket upgrade)
+- `GET /api/consumer/ws/{tenant}/{app}/{event}?ttl_seconds=300` (WebSocket upgrade)
+
+For example, connect to `ws://localhost:3000/api/consumer/ws/shopify/orders`.
+Topic matching is identical to HTTP receive: omitting `event` matches all events
+for that tenant/app; providing it matches that exact event.
+
+The server sends one JSON text message per webhook, using the same record format
+and claim/TTL lifecycle as HTTP receive. Pending webhooks are delivered immediately
+on connection, and newly captured webhooks trigger delivery without database polling.
+Clients do not need to send receive requests over the socket.
+
+An active subscription reserves its topic on this server instance:
+
+- Another WebSocket connection with an overlapping topic returns `409 Conflict`
+  before upgrade (including exact-event vs. all-event overlaps in either direction).
+- HTTP receive for an overlapping topic also returns `409 Conflict`.
+- Non-overlapping subscriptions and HTTP receives remain available. Peek, complete,
+  check-in, and operator endpoints remain HTTP-only and are not blocked.
+
+Closing or losing the connection releases the reservation. Already delivered records
+remain `received` until completed or expired; use the existing HTTP complete/check-in
+endpoints for them. Invalid non-positive TTLs return `400 Bad Request` before upgrade.
+Database errors send an `{"error":"failed to receive webhook"}` message and end the
+connection. Slow clients whose sends time out are disconnected.
+
+Reservations and notifications are in-process: WebSocket subscribers and their webhook
+producers must use the same server instance. They do not coordinate across replicas
+or detect inserts made directly into PostgreSQL.
+
+WebSocket conflict tests run with `cargo test websocket`. To also test delivery
+against a disposable PostgreSQL database, set `TEST_DATABASE_URL` and run:
+
+```bash
+cargo test websocket_delivers -- --ignored
+```
+
+### HTTP lifecycle and operator endpoints
+
 - `POST /api/consumer/webhooks/{id}/complete`
 
 Mark a previously received webhook as finished.
