@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Notify};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -51,42 +51,82 @@ impl WebhookTopic {
 
 #[derive(Default)]
 struct WebsocketSubscriptions {
-    topics: Mutex<HashMap<Uuid, WebhookTopic>>,
-    // HTTP claims hold a read lock so registration cannot race a claim.
-    receive_gate: RwLock<()>,
+    topics: Mutex<HashMap<Uuid, ReservedTopic>>,
+    changed: Notify,
+}
+
+struct ReservedTopic {
+    topic: WebhookTopic,
+    websocket: bool,
+}
+
+#[derive(Debug)]
+enum ReservationConflict {
+    Websocket,
+    Http,
 }
 
 impl WebsocketSubscriptions {
+    #[cfg(test)]
     fn conflicts(&self, topic: &WebhookTopic) -> bool {
         self.topics
             .lock()
             .unwrap()
             .values()
-            .any(|existing| existing.overlaps(topic))
+            .any(|existing| existing.websocket && existing.topic.overlaps(topic))
     }
 
-    fn register(self: &Arc<Self>, topic: WebhookTopic) -> Result<WebsocketSubscription, ()> {
+    async fn register(self: &Arc<Self>, topic: WebhookTopic) -> Result<TopicReservation, ()> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            // Register the waiter before checking claims to avoid missed releases.
+            changed.as_mut().enable();
+            match self.reserve(topic.clone(), true) {
+                Ok(reservation) => return Ok(reservation),
+                Err(ReservationConflict::Websocket) => return Err(()),
+                Err(ReservationConflict::Http) => changed.await,
+            }
+        }
+    }
+
+    fn reserve(
+        self: &Arc<Self>,
+        topic: WebhookTopic,
+        websocket: bool,
+    ) -> Result<TopicReservation, ReservationConflict> {
         let mut topics = self.topics.lock().unwrap();
-        if topics.values().any(|existing| existing.overlaps(&topic)) {
-            return Err(());
+        if topics
+            .values()
+            .any(|existing| existing.websocket && existing.topic.overlaps(&topic))
+        {
+            return Err(ReservationConflict::Websocket);
+        }
+        if websocket
+            && topics
+                .values()
+                .any(|existing| existing.topic.overlaps(&topic))
+        {
+            return Err(ReservationConflict::Http);
         }
         let id = Uuid::new_v4();
-        topics.insert(id, topic);
-        Ok(WebsocketSubscription {
+        topics.insert(id, ReservedTopic { topic, websocket });
+        Ok(TopicReservation {
             registry: self.clone(),
             id,
         })
     }
 }
 
-struct WebsocketSubscription {
+struct TopicReservation {
     registry: Arc<WebsocketSubscriptions>,
     id: Uuid,
 }
 
-impl Drop for WebsocketSubscription {
+impl Drop for TopicReservation {
     fn drop(&mut self) {
         self.registry.topics.lock().unwrap().remove(&self.id);
+        self.registry.changed.notify_waiters();
     }
 }
 
@@ -558,13 +598,11 @@ async fn websocket_receive(
         Ok(ttl) => ttl,
         Err(response) => return response,
     };
-    let gate = state.subscriptions.receive_gate.write().await;
-    let subscription = match state.subscriptions.register(topic.clone()) {
+    let subscription = match state.subscriptions.register(topic.clone()).await {
         Ok(subscription) => subscription,
         Err(()) => return subscription_conflict(),
     };
     let changes = state.webhooks_changed.subscribe();
-    drop(gate);
     upgrade
         .max_message_size(1024)
         .max_frame_size(1024)
@@ -579,7 +617,7 @@ async fn websocket_receive_loop(
     topic: WebhookTopic,
     ttl_seconds: i64,
     mut changes: watch::Receiver<()>,
-    _subscription: WebsocketSubscription,
+    _subscription: TopicReservation,
 ) {
     let mut pending = true;
     let mut claim = Box::pin(claim_webhook(
@@ -971,15 +1009,15 @@ async fn receive_webhook(
     event: Option<&str>,
     requested_ttl_seconds: Option<i64>,
 ) -> Response {
-    let _gate = state.subscriptions.receive_gate.read().await;
     let topic = WebhookTopic {
         tenant: tenant.to_string(),
         app: app.to_string(),
         event: event.map(str::to_string),
     };
-    if state.subscriptions.conflicts(&topic) {
-        return subscription_conflict();
-    }
+    let _reservation = match state.subscriptions.reserve(topic, false) {
+        Ok(reservation) => reservation,
+        Err(_) => return subscription_conflict(),
+    };
     match claim_webhook(state, tenant, app, event, requested_ttl_seconds).await {
         Ok(Some(webhook)) => (StatusCode::OK, Json(webhook)).into_response(),
         Ok(None) => StatusCode::NO_CONTENT.into_response(),
@@ -1347,7 +1385,7 @@ mod tests {
         for _ in 0..10 {
             let registry = registry.clone();
             tasks.push(tokio::spawn(async move {
-                registry.register(topic("tenant", "app", None)).ok()
+                registry.register(topic("tenant", "app", None)).await.ok()
             }));
         }
         let mut subscriptions = Vec::new();
@@ -1360,18 +1398,23 @@ mod tests {
         assert!(registry.conflicts(&topic("tenant", "app", Some("event"))));
         drop(subscriptions);
         assert!(!registry.conflicts(&topic("tenant", "app", None)));
-        assert!(registry.register(topic("tenant", "app", None)).is_ok());
+        assert!(registry
+            .register(topic("tenant", "app", None))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
     async fn websocket_registration_waits_for_in_flight_http_receive() {
         let registry = Arc::new(WebsocketSubscriptions::default());
-        let claim_guard = registry.receive_gate.read().await;
+        let claim_guard = registry
+            .reserve(topic("tenant", "app", Some("event")), false)
+            .unwrap();
         let subscriber_registry = registry.clone();
         let mut registration = tokio::spawn(async move {
-            let _gate = subscriber_registry.receive_gate.write().await;
             subscriber_registry
                 .register(topic("tenant", "app", None))
+                .await
                 .unwrap()
         });
         assert!(
@@ -1380,6 +1423,23 @@ mod tests {
                 .is_err()
         );
         assert!(!registry.conflicts(&topic("tenant", "app", None)));
+        let unrelated = tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.register(topic("tenant", "app", Some("other"))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let other_tenant = registry
+            .register(topic("other", "app", None))
+            .await
+            .unwrap();
+        let other_http = registry
+            .reserve(topic("tenant", "app", Some("event")), false)
+            .unwrap();
+        drop(unrelated);
+        drop(other_tenant);
+        drop(other_http);
         drop(claim_guard);
         let subscription = registration.await.unwrap();
         assert!(registry.conflicts(&topic("tenant", "app", None)));
