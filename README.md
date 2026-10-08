@@ -113,7 +113,7 @@ The table is auto-created on startup:
 Create a single-use callback slot:
 
 ```http
-POST /oneoffs
+POST /api/oneoffs
 ```
 
 The response contains a UUID and relative callback URL:
@@ -121,11 +121,11 @@ The response contains a UUID and relative callback URL:
 ```json
 {
   "id": "a1d714a6-2d6a-4b46-8108-2e01bf366413",
-  "callback_url": "/webhooks/a1d714a6-2d6a-4b46-8108-2e01bf366413"
+  "callback_url": "/api/webhooks/a1d714a6-2d6a-4b46-8108-2e01bf366413"
 }
 ```
 
-The sender fulfills the slot by posting a JSON payload to that callback URL. The receiver can poll it with `GET /webhooks/{id}`:
+The sender fulfills the slot by posting a JSON payload to that callback URL. The receiver can poll it with `GET /api/webhooks/{id}`:
 
 - `202 Accepted` while waiting for fulfillment
 - `200 OK` with the JSON payload after fulfillment

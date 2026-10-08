@@ -2,7 +2,7 @@ use axum::{
     body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, DefaultBodyLimit, OriginalUri, Path, Query, State,
+        ConnectInfo, OriginalUri, Path, Query, State,
     },
     http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
@@ -362,13 +362,7 @@ async fn main() {
 
 fn build_app(state: AppState) -> Router {
     let oneoff_routes = Router::new()
-        .route("/oneoffs", post(create_oneoff))
-        .route(
-            "/webhooks/{id}",
-            get(poll_oneoff)
-                .post(fulfill_oneoff)
-                .layer(DefaultBodyLimit::max(state.oneoff_max_body_bytes)),
-        )
+        .route("/api/oneoffs", post(create_oneoff))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_oneoffs,
@@ -377,7 +371,13 @@ fn build_app(state: AppState) -> Router {
     Router::new()
         .merge(oneoff_routes)
         .route("/api/webhooks", any(capture_webhook))
-        .route("/api/webhooks/{*rest}", any(capture_webhook))
+        .route(
+            "/api/webhooks/{*rest}",
+            any(api_webhook).layer(middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit_oneoffs,
+            )),
+        )
         .route(
             "/api/consumer/peek/{tenant}/{app}",
             get(peek_webhook_tenant_app),
@@ -427,6 +427,11 @@ async fn rate_limit_oneoffs(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let route_is_oneoff = oneoff_webhook_id(request.uri().path()).is_some()
+        && (request.method() == Method::GET || request.method() == Method::POST);
+    if !route_is_oneoff {
+        return next.run(request).await;
+    }
     let ip = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -441,6 +446,50 @@ async fn rate_limit_oneoffs(
             .into_response();
     }
     next.run(request).await
+}
+
+async fn api_webhook(
+    State(state): State<AppState>,
+    method: Method,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    if let Some(id) = oneoff_webhook_id(original_uri.path()) {
+        match method {
+            Method::GET => return poll_oneoff(State(state), Path(id)).await,
+            Method::POST => {
+                if body.len() > state.oneoff_max_body_bytes {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(serde_json::json!({ "error": "request body is too large" })),
+                    )
+                        .into_response();
+                }
+                return fulfill_oneoff(State(state), Path(id), body).await;
+            }
+            _ => {}
+        }
+    }
+    capture_webhook(
+        State(state),
+        method,
+        original_uri,
+        headers,
+        Query(query),
+        body,
+    )
+    .await
+    .into_response()
+}
+
+fn oneoff_webhook_id(path: &str) -> Option<Uuid> {
+    let id = path.strip_prefix("/api/webhooks/")?;
+    if id.contains('/') {
+        return None;
+    }
+    Uuid::parse_str(id).ok()
 }
 
 fn allow_oneoff_request(state: &AppState, ip: IpAddr, now: Instant) -> bool {
@@ -479,7 +528,7 @@ async fn create_oneoff(State(state): State<AppState>) -> Response {
             StatusCode::CREATED,
             Json(OneOffCreatedResponse {
                 id,
-                callback_url: format!("/webhooks/{id}"),
+                callback_url: format!("/api/webhooks/{id}"),
             }),
         )
             .into_response(),
@@ -2114,7 +2163,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/oneoffs")
+                    .uri("/api/oneoffs")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2125,13 +2174,13 @@ mod tests {
             serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         let id = created["id"].as_str().unwrap();
-        assert_eq!(created["callback_url"], format!("/webhooks/{id}"));
+        assert_eq!(created["callback_url"], format!("/api/webhooks/{id}"));
 
         let poll = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/webhooks/{id}"))
+                    .uri(format!("/api/webhooks/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2143,7 +2192,7 @@ mod tests {
             app.clone().oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(format!("/webhooks/{id}"))
+                    .uri(format!("/api/webhooks/{id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(payload))
                     .unwrap(),
@@ -2173,7 +2222,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/webhooks/{id}"))
+                    .uri(format!("/api/webhooks/{id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2200,7 +2249,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(format!("/webhooks/{id}"))
+                    .uri(format!("/api/webhooks/{id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
                         r#"{{"payload":"{}"}}"#,
@@ -2217,7 +2266,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/oneoffs")
+                    .uri("/api/oneoffs")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2238,7 +2287,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/webhooks/{expired_id}"))
+                    .uri(format!("/api/webhooks/{expired_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2250,7 +2299,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(format!("/webhooks/{expired_id}"))
+                    .uri(format!("/api/webhooks/{expired_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"late":true}"#))
                     .unwrap(),
