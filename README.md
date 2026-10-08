@@ -29,6 +29,10 @@ The app reads these env vars (matching `.env.example`):
 - `DB_PORT`
 - `DB_DATABASE`
 - `DEFAULT_RECEIVE_TTL_SECONDS` (optional, default `300`)
+- `ONEOFF_PENDING_TTL_SECONDS` (optional, default `1209600` / 14 days)
+- `ONEOFF_RETENTION_SECONDS` (optional, default `259200` / 72 hours)
+- `ONEOFF_MAX_BODY_BYTES` (optional, default `1048576`)
+- `ONEOFF_RATE_LIMIT_PER_MINUTE` (optional, default `120` per client IP)
 
 By default, the server listens on `0.0.0.0:3000`.
 
@@ -103,6 +107,31 @@ make k6-smoke
 The table is auto-created on startup:
 
 `incoming_webhooks`
+
+## One-off callback API
+
+Create a single-use callback slot:
+
+```http
+POST /oneoffs
+```
+
+The response contains a UUID and relative callback URL:
+
+```json
+{
+  "id": "a1d714a6-2d6a-4b46-8108-2e01bf366413",
+  "callback_url": "/webhooks/a1d714a6-2d6a-4b46-8108-2e01bf366413"
+}
+```
+
+The sender fulfills the slot by posting a JSON payload to that callback URL. The receiver can poll it with `GET /webhooks/{id}`:
+
+- `202 Accepted` while waiting for fulfillment
+- `200 OK` with the JSON payload after fulfillment
+- `404 Not Found` for unknown or expired IDs
+
+The first fulfillment wins. Repeating the same payload is an idempotent `200 OK`; trying a different payload returns `409 Conflict`. Fulfilled results remain available for the retention window, and expired rows are cleaned up in batches.
 
 ## Consumer API (peek / receive / complete / check-in)
 

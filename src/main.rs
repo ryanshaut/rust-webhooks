@@ -2,9 +2,10 @@ use axum::{
     body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        OriginalUri, Path, Query, State,
+        ConnectInfo, DefaultBodyLimit, OriginalUri, Path, Query, State,
     },
     http::{HeaderMap, Method, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
     Json, Router,
@@ -17,9 +18,9 @@ use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use std::{
     collections::HashMap,
     env,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{watch, Notify};
 use uuid::Uuid;
@@ -30,8 +31,19 @@ struct AppState {
     sensitive_headers: SensitiveKeysConfig,
     sensitive_query_keys: SensitiveKeysConfig,
     default_ttl_seconds: i64,
+    oneoff_pending_ttl_seconds: i64,
+    oneoff_retention_seconds: i64,
+    oneoff_max_body_bytes: usize,
+    oneoff_rate_limit_per_minute: u32,
+    oneoff_rate_limits: Arc<Mutex<HashMap<IpAddr, RateLimitWindow>>>,
     subscriptions: Arc<WebsocketSubscriptions>,
     webhooks_changed: watch::Sender<()>,
+}
+
+#[derive(Clone, Copy)]
+struct RateLimitWindow {
+    started_at: Instant,
+    requests: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +267,24 @@ struct OperatorActiveWebhookStreamResponse {
     total_active: i64,
 }
 
+#[derive(Serialize)]
+struct OneOffCreatedResponse {
+    id: Uuid,
+    callback_url: String,
+}
+
+#[derive(Serialize)]
+struct OneOffFulfilledResponse {
+    id: Uuid,
+    status: &'static str,
+}
+
+#[derive(FromRow)]
+struct OneOffHookState {
+    status: String,
+    payload: Option<Value>,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -280,14 +310,35 @@ async fn main() {
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(300);
+    let oneoff_pending_ttl_seconds =
+        positive_env_i64("ONEOFF_PENDING_TTL_SECONDS", 14 * 24 * 60 * 60);
+    let oneoff_retention_seconds = positive_env_i64("ONEOFF_RETENTION_SECONDS", 72 * 60 * 60);
+    let oneoff_max_body_bytes = positive_env_usize("ONEOFF_MAX_BODY_BYTES", 1024 * 1024);
+    let oneoff_rate_limit_per_minute = positive_env_u32("ONEOFF_RATE_LIMIT_PER_MINUTE", 120);
+    let cleanup_db = db.clone();
 
     let app = build_app(AppState {
         db,
         sensitive_headers,
         sensitive_query_keys,
         default_ttl_seconds,
+        oneoff_pending_ttl_seconds,
+        oneoff_retention_seconds,
+        oneoff_max_body_bytes,
+        oneoff_rate_limit_per_minute,
+        oneoff_rate_limits: Arc::default(),
         subscriptions: Arc::default(),
         webhooks_changed: watch::channel(()).0,
+    });
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(err) = cleanup_expired_oneoffs(&cleanup_db).await {
+                eprintln!("failed to clean up expired one-off hooks: {err}");
+            }
+        }
     });
 
     let port = env::var("PORT")
@@ -301,11 +352,30 @@ async fn main() {
 
     println!("Webhook server listening on http://{}", addr);
 
-    axum::serve(listener, app).await.expect("server failed");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server failed");
 }
 
 fn build_app(state: AppState) -> Router {
+    let oneoff_routes = Router::new()
+        .route("/oneoffs", post(create_oneoff))
+        .route(
+            "/webhooks/{id}",
+            get(poll_oneoff)
+                .post(fulfill_oneoff)
+                .layer(DefaultBodyLimit::max(state.oneoff_max_body_bytes)),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_oneoffs,
+        ));
+
     Router::new()
+        .merge(oneoff_routes)
         .route("/api/webhooks", any(capture_webhook))
         .route("/api/webhooks/{*rest}", any(capture_webhook))
         .route(
@@ -352,6 +422,230 @@ fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn rate_limit_oneoffs(
+    State(state): State<AppState>,
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(address)| address.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    if !allow_oneoff_request(&state, ip, Instant::now()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "60")],
+            Json(serde_json::json!({ "error": "rate limit exceeded" })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+fn allow_oneoff_request(state: &AppState, ip: IpAddr, now: Instant) -> bool {
+    let window = Duration::from_secs(60);
+    let mut rate_limits = state.oneoff_rate_limits.lock().unwrap();
+    rate_limits.retain(|_, limit| now.duration_since(limit.started_at) < window * 2);
+    let limit = rate_limits.entry(ip).or_insert(RateLimitWindow {
+        started_at: now,
+        requests: 0,
+    });
+    if now.duration_since(limit.started_at) >= window {
+        limit.started_at = now;
+        limit.requests = 0;
+    }
+    if limit.requests >= state.oneoff_rate_limit_per_minute {
+        return false;
+    }
+    limit.requests += 1;
+    true
+}
+
+async fn create_oneoff(State(state): State<AppState>) -> Response {
+    let created = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO oneoff_hooks (expires_at)
+        VALUES (NOW() + ($1::bigint * INTERVAL '1 second'))
+        RETURNING id
+        "#,
+    )
+    .bind(state.oneoff_pending_ttl_seconds)
+    .fetch_one(&state.db)
+    .await;
+
+    match created {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(OneOffCreatedResponse {
+                id,
+                callback_url: format!("/webhooks/{id}"),
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            eprintln!("failed to create one-off hook: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to create one-off hook" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn poll_oneoff(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+    let hook = sqlx::query_as::<_, OneOffHookState>(
+        r#"
+        SELECT status, payload
+        FROM oneoff_hooks
+        WHERE id = $1 AND expires_at > NOW()
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await;
+
+    match hook {
+        Ok(Some(hook)) if hook.status == "pending" => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "status": "pending" })),
+        )
+            .into_response(),
+        Ok(Some(hook)) if hook.status == "fulfilled" => {
+            Json(hook.payload.unwrap_or(Value::Null)).into_response()
+        }
+        Ok(Some(_)) => {
+            eprintln!("one-off hook has an invalid status");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            eprintln!("failed to poll one-off hook: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to poll one-off hook" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn fulfill_oneoff(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "request body must be valid JSON" })),
+            )
+                .into_response();
+        }
+    };
+
+    let fulfilled = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE oneoff_hooks
+        SET status = 'fulfilled',
+            payload = $2,
+            fulfilled_at = NOW(),
+            expires_at = NOW() + ($3::bigint * INTERVAL '1 second')
+        WHERE id = $1 AND status = 'pending' AND expires_at > NOW()
+        RETURNING id
+        "#,
+    )
+    .bind(id)
+    .bind(&payload)
+    .bind(state.oneoff_retention_seconds)
+    .fetch_optional(&state.db)
+    .await;
+
+    match fulfilled {
+        Ok(Some(id)) => (
+            StatusCode::OK,
+            Json(OneOffFulfilledResponse {
+                id,
+                status: "fulfilled",
+            }),
+        )
+            .into_response(),
+        Ok(None) => {
+            let existing = sqlx::query_as::<_, OneOffHookState>(
+                r#"
+                SELECT status, payload
+                FROM oneoff_hooks
+                WHERE id = $1 AND expires_at > NOW()
+                "#,
+            )
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await;
+            match existing {
+                Ok(Some(existing))
+                    if existing.status == "fulfilled"
+                        && existing.payload.as_ref() == Some(&payload) =>
+                {
+                    (
+                        StatusCode::OK,
+                        Json(OneOffFulfilledResponse {
+                            id,
+                            status: "fulfilled",
+                        }),
+                    )
+                        .into_response()
+                }
+                Ok(Some(existing)) if existing.status == "fulfilled" => (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({ "error": "one-off hook already fulfilled" })),
+                )
+                    .into_response(),
+                Ok(_) => StatusCode::NOT_FOUND.into_response(),
+                Err(err) => {
+                    eprintln!("failed to check one-off hook fulfillment: {err}");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "failed to fulfill one-off hook" })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("failed to fulfill one-off hook: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to fulfill one-off hook" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn cleanup_expired_oneoffs(db: &PgPool) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        r#"
+        WITH expired AS (
+            SELECT id
+            FROM oneoff_hooks
+            WHERE expires_at <= NOW()
+            ORDER BY expires_at
+            LIMIT 1000
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM oneoff_hooks hook
+        USING expired
+        WHERE hook.id = expired.id
+        "#,
+    )
+    .execute(db)
+    .await?;
+    Ok(deleted.rows_affected())
+}
+
 async fn ensure_schema(db: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -373,6 +667,28 @@ async fn ensure_schema(db: &PgPool) -> Result<(), sqlx::Error> {
             ttl_expires_at TIMESTAMPTZ
         );
         "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS oneoff_hooks (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'fulfilled')),
+            payload JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            fulfilled_at TIMESTAMPTZ,
+            expires_at TIMESTAMPTZ NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS oneoff_hooks_expires_at_idx ON oneoff_hooks (expires_at)",
     )
     .execute(db)
     .await?;
@@ -1300,6 +1616,30 @@ fn encode_base64(data: &[u8]) -> String {
     out
 }
 
+fn positive_env_i64(name: &str, default: i64) -> i64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn positive_env_usize(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn positive_env_u32(name: &str, default: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 fn database_url_from_env() -> String {
     let username = env::var("DB_USERNAME").unwrap_or_else(|_| "postgres".to_string());
     let password = env::var("DB_PASSWORD").unwrap_or_default();
@@ -1348,6 +1688,11 @@ mod tests {
                 suffix: vec![],
             },
             default_ttl_seconds: 300,
+            oneoff_pending_ttl_seconds: 14 * 24 * 60 * 60,
+            oneoff_retention_seconds: 72 * 60 * 60,
+            oneoff_max_body_bytes: 128,
+            oneoff_rate_limit_per_minute: 120,
+            oneoff_rate_limits: Arc::default(),
             subscriptions: Arc::default(),
             webhooks_changed: watch::channel(()).0,
         }
@@ -1355,6 +1700,25 @@ mod tests {
 
     fn test_app() -> Router {
         build_app(test_state())
+    }
+
+    #[tokio::test]
+    async fn oneoff_rate_limit_is_per_ip_and_resets_after_one_minute() {
+        let mut state = test_state();
+        state.oneoff_rate_limit_per_minute = 2;
+        let now = Instant::now();
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let other_ip: IpAddr = "192.0.2.2".parse().unwrap();
+
+        assert!(allow_oneoff_request(&state, ip, now));
+        assert!(allow_oneoff_request(&state, ip, now));
+        assert!(!allow_oneoff_request(&state, ip, now));
+        assert!(allow_oneoff_request(&state, other_ip, now));
+        assert!(allow_oneoff_request(
+            &state,
+            ip,
+            now + Duration::from_secs(60)
+        ));
     }
 
     fn topic(tenant: &str, app: &str, event: Option<&str>) -> WebhookTopic {
@@ -1731,6 +2095,189 @@ mod tests {
                 .unwrap();
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a PostgreSQL database in TEST_DATABASE_URL"]
+    async fn oneoff_endpoints_enforce_single_fulfillment_and_expiration() {
+        use axum::body::to_bytes;
+
+        let mut state = test_state();
+        state.db = PgPool::connect(&env::var("TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        ensure_schema(&state.db).await.unwrap();
+        let app = build_app(state.clone());
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oneoffs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["callback_url"], format!("/webhooks/{id}"));
+
+        let poll = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/webhooks/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(poll.status(), StatusCode::ACCEPTED);
+
+        let fulfill = |payload: String| {
+            app.clone().oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/webhooks/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+        };
+        let (first, second) = tokio::join!(
+            fulfill(r#""first""#.to_string()),
+            fulfill(r#""second""#.to_string())
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(
+            [first.status(), second.status()]
+                .iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
+            1
+        );
+        assert_eq!(
+            [first.status(), second.status()]
+                .iter()
+                .filter(|status| **status == StatusCode::CONFLICT)
+                .count(),
+            1
+        );
+
+        let poll = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/webhooks/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(poll.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(poll.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(payload == "first" || payload == "second");
+        let matching = serde_json::to_string(&payload).unwrap();
+        let conflicting = if payload == "first" {
+            r#""second""#
+        } else {
+            r#""first""#
+        };
+        assert_eq!(fulfill(matching).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            fulfill(conflicting.to_string()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+
+        let too_large = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/webhooks/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"payload":"{}"}}"#,
+                        "x".repeat(256)
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let expired = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oneoffs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let expired: Value =
+            serde_json::from_slice(&to_bytes(expired.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let expired_id = expired["id"].as_str().unwrap();
+        sqlx::query(
+            "UPDATE oneoff_hooks SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(Uuid::parse_str(expired_id).unwrap())
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let poll_expired = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/webhooks/{expired_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(poll_expired.status(), StatusCode::NOT_FOUND);
+        let fulfill_expired = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/webhooks/{expired_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"late":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fulfill_expired.status(), StatusCode::NOT_FOUND);
+        assert!(cleanup_expired_oneoffs(&state.db).await.unwrap() >= 1);
+        let expired_remaining =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM oneoff_hooks WHERE id = $1")
+                .bind(Uuid::parse_str(expired_id).unwrap())
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(expired_remaining, 0);
+        let remaining =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM oneoff_hooks WHERE id = $1")
+                .bind(Uuid::parse_str(id).unwrap())
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 1);
+        sqlx::query("DELETE FROM oneoff_hooks WHERE id = $1")
+            .bind(Uuid::parse_str(id).unwrap())
+            .execute(&state.db)
+            .await
+            .unwrap();
     }
 
     #[test]
