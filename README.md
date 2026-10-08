@@ -172,6 +172,36 @@ against a disposable PostgreSQL database, set `TEST_DATABASE_URL` and run:
 cargo test websocket_delivers -- --ignored
 ```
 
+#### Python producer and consumer examples
+
+The examples follow `scripts/test.py`: webhooks are produced over HTTP,
+received over WebSocket, and completed over HTTP. With the server running,
+install the Python dependencies from the repository root:
+
+```bash
+uv sync
+```
+
+Start the consumer in one terminal:
+
+```bash
+uv run python scripts/websocket_consumer.py --topic test/foo --count 5
+```
+
+Then send five sample webhooks from another terminal:
+
+```bash
+uv run python scripts/websocket_producer.py --topic test/foo/buzz --count 5
+```
+
+The consumer prints each record and marks it successful. Omitting `--count` keeps
+it listening until Ctrl+C. Use `--topic test/foo/buzz` to subscribe to one exact
+event instead of all events. Both scripts accept `--base-url http://localhost:3000`;
+the consumer converts HTTPS URLs to `wss://` automatically. The producer accepts
+`--interval` (seconds between requests), and the consumer accepts `--ttl-seconds`.
+An overlapping consumer fails with HTTP `409 Conflict`; these examples do not
+retry or perform long-running processing/check-ins.
+
 ### HTTP lifecycle and operator endpoints
 
 - `POST /api/consumer/webhooks/{id}/complete`
