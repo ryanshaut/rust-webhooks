@@ -31,11 +31,11 @@ struct AppState {
     sensitive_headers: SensitiveKeysConfig,
     sensitive_query_keys: SensitiveKeysConfig,
     default_ttl_seconds: i64,
-    oneoff_pending_ttl_seconds: i64,
-    oneoff_retention_seconds: i64,
-    oneoff_max_body_bytes: usize,
-    oneoff_rate_limit_per_minute: u32,
-    oneoff_rate_limits: Arc<Mutex<HashMap<IpAddr, RateLimitWindow>>>,
+    callback_pending_ttl_seconds: i64,
+    callback_retention_seconds: i64,
+    callback_max_body_bytes: usize,
+    callback_rate_limit_per_minute: u32,
+    callback_rate_limits: Arc<Mutex<HashMap<IpAddr, RateLimitWindow>>>,
     subscriptions: Arc<WebsocketSubscriptions>,
     webhooks_changed: watch::Sender<()>,
 }
@@ -268,19 +268,19 @@ struct OperatorActiveWebhookStreamResponse {
 }
 
 #[derive(Serialize)]
-struct OneOffCreatedResponse {
+struct CallbackCreatedResponse {
     id: Uuid,
     callback_url: String,
 }
 
 #[derive(Serialize)]
-struct OneOffFulfilledResponse {
+struct CallbackFulfilledResponse {
     id: Uuid,
     status: &'static str,
 }
 
 #[derive(FromRow)]
-struct OneOffHookState {
+struct CallbackState {
     status: String,
     payload: Option<Value>,
 }
@@ -310,11 +310,11 @@ async fn main() {
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(300);
-    let oneoff_pending_ttl_seconds =
-        positive_env_i64("ONEOFF_PENDING_TTL_SECONDS", 14 * 24 * 60 * 60);
-    let oneoff_retention_seconds = positive_env_i64("ONEOFF_RETENTION_SECONDS", 72 * 60 * 60);
-    let oneoff_max_body_bytes = positive_env_usize("ONEOFF_MAX_BODY_BYTES", 1024 * 1024);
-    let oneoff_rate_limit_per_minute = positive_env_u32("ONEOFF_RATE_LIMIT_PER_MINUTE", 120);
+    let callback_pending_ttl_seconds =
+        positive_env_i64("CALLBACK_PENDING_TTL_SECONDS", 14 * 24 * 60 * 60);
+    let callback_retention_seconds = positive_env_i64("CALLBACK_RETENTION_SECONDS", 72 * 60 * 60);
+    let callback_max_body_bytes = positive_env_usize("CALLBACK_MAX_BODY_BYTES", 1024 * 1024);
+    let callback_rate_limit_per_minute = positive_env_u32("CALLBACK_RATE_LIMIT_PER_MINUTE", 120);
     let cleanup_db = db.clone();
 
     let app = build_app(AppState {
@@ -322,11 +322,11 @@ async fn main() {
         sensitive_headers,
         sensitive_query_keys,
         default_ttl_seconds,
-        oneoff_pending_ttl_seconds,
-        oneoff_retention_seconds,
-        oneoff_max_body_bytes,
-        oneoff_rate_limit_per_minute,
-        oneoff_rate_limits: Arc::default(),
+        callback_pending_ttl_seconds,
+        callback_retention_seconds,
+        callback_max_body_bytes,
+        callback_rate_limit_per_minute,
+        callback_rate_limits: Arc::default(),
         subscriptions: Arc::default(),
         webhooks_changed: watch::channel(()).0,
     });
@@ -335,8 +335,8 @@ async fn main() {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            if let Err(err) = cleanup_expired_oneoffs(&cleanup_db).await {
-                eprintln!("failed to clean up expired one-off hooks: {err}");
+            if let Err(err) = cleanup_expired_callbacks(&cleanup_db).await {
+                eprintln!("failed to clean up expired callbacks: {err}");
             }
         }
     });
@@ -361,21 +361,21 @@ async fn main() {
 }
 
 fn build_app(state: AppState) -> Router {
-    let oneoff_routes = Router::new()
-        .route("/api/oneoffs", post(create_oneoff))
+    let callback_routes = Router::new()
+        .route("/api/callbacks", post(create_callback))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            rate_limit_oneoffs,
+            rate_limit_callbacks,
         ));
 
     Router::new()
-        .merge(oneoff_routes)
+        .merge(callback_routes)
         .route("/api/webhooks", any(capture_webhook))
         .route(
             "/api/webhooks/{*rest}",
             any(api_webhook).layer(middleware::from_fn_with_state(
                 state.clone(),
-                rate_limit_oneoffs,
+                rate_limit_callbacks,
             )),
         )
         .route(
@@ -422,14 +422,14 @@ fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn rate_limit_oneoffs(
+async fn rate_limit_callbacks(
     State(state): State<AppState>,
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let route_is_oneoff = oneoff_webhook_id(request.uri().path()).is_some()
+    let route_is_callback = callback_webhook_id(request.uri().path()).is_some()
         && (request.method() == Method::GET || request.method() == Method::POST);
-    if !route_is_oneoff {
+    if !route_is_callback {
         return next.run(request).await;
     }
     let ip = request
@@ -437,7 +437,7 @@ async fn rate_limit_oneoffs(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(address)| address.ip())
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    if !allow_oneoff_request(&state, ip, Instant::now()) {
+    if !allow_callback_request(&state, ip, Instant::now()) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "60")],
@@ -456,18 +456,18 @@ async fn api_webhook(
     Query(query): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    if let Some(id) = oneoff_webhook_id(original_uri.path()) {
+    if let Some(id) = callback_webhook_id(original_uri.path()) {
         match method {
-            Method::GET => return poll_oneoff(State(state), Path(id)).await,
+            Method::GET => return poll_callback(State(state), Path(id)).await,
             Method::POST => {
-                if body.len() > state.oneoff_max_body_bytes {
+                if body.len() > state.callback_max_body_bytes {
                     return (
                         StatusCode::PAYLOAD_TOO_LARGE,
                         Json(serde_json::json!({ "error": "request body is too large" })),
                     )
                         .into_response();
                 }
-                return fulfill_oneoff(State(state), Path(id), body).await;
+                return fulfill_callback(State(state), Path(id), body).await;
             }
             _ => {}
         }
@@ -484,7 +484,7 @@ async fn api_webhook(
     .into_response()
 }
 
-fn oneoff_webhook_id(path: &str) -> Option<Uuid> {
+fn callback_webhook_id(path: &str) -> Option<Uuid> {
     let id = path.strip_prefix("/api/webhooks/")?;
     if id.contains('/') {
         return None;
@@ -492,9 +492,9 @@ fn oneoff_webhook_id(path: &str) -> Option<Uuid> {
     Uuid::parse_str(id).ok()
 }
 
-fn allow_oneoff_request(state: &AppState, ip: IpAddr, now: Instant) -> bool {
+fn allow_callback_request(state: &AppState, ip: IpAddr, now: Instant) -> bool {
     let window = Duration::from_secs(60);
-    let mut rate_limits = state.oneoff_rate_limits.lock().unwrap();
+    let mut rate_limits = state.callback_rate_limits.lock().unwrap();
     rate_limits.retain(|_, limit| now.duration_since(limit.started_at) < window * 2);
     let limit = rate_limits.entry(ip).or_insert(RateLimitWindow {
         started_at: now,
@@ -504,14 +504,14 @@ fn allow_oneoff_request(state: &AppState, ip: IpAddr, now: Instant) -> bool {
         limit.started_at = now;
         limit.requests = 0;
     }
-    if limit.requests >= state.oneoff_rate_limit_per_minute {
+    if limit.requests >= state.callback_rate_limit_per_minute {
         return false;
     }
     limit.requests += 1;
     true
 }
 
-async fn create_oneoff(State(state): State<AppState>) -> Response {
+async fn create_callback(State(state): State<AppState>) -> Response {
     let created = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO oneoff_hooks (expires_at)
@@ -519,32 +519,32 @@ async fn create_oneoff(State(state): State<AppState>) -> Response {
         RETURNING id
         "#,
     )
-    .bind(state.oneoff_pending_ttl_seconds)
+    .bind(state.callback_pending_ttl_seconds)
     .fetch_one(&state.db)
     .await;
 
     match created {
         Ok(id) => (
             StatusCode::CREATED,
-            Json(OneOffCreatedResponse {
+            Json(CallbackCreatedResponse {
                 id,
                 callback_url: format!("/api/webhooks/{id}"),
             }),
         )
             .into_response(),
         Err(err) => {
-            eprintln!("failed to create one-off hook: {err}");
+            eprintln!("failed to create callback: {err}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "failed to create one-off hook" })),
+                Json(serde_json::json!({ "error": "failed to create callback" })),
             )
                 .into_response()
         }
     }
 }
 
-async fn poll_oneoff(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
-    let hook = sqlx::query_as::<_, OneOffHookState>(
+async fn poll_callback(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+    let hook = sqlx::query_as::<_, CallbackState>(
         r#"
         SELECT status, payload
         FROM oneoff_hooks
@@ -565,22 +565,22 @@ async fn poll_oneoff(State(state): State<AppState>, Path(id): Path<Uuid>) -> Res
             Json(hook.payload.unwrap_or(Value::Null)).into_response()
         }
         Ok(Some(_)) => {
-            eprintln!("one-off hook has an invalid status");
+            eprintln!("callback has an invalid status");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
-            eprintln!("failed to poll one-off hook: {err}");
+            eprintln!("failed to poll callback: {err}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "failed to poll one-off hook" })),
+                Json(serde_json::json!({ "error": "failed to poll callback" })),
             )
                 .into_response()
         }
     }
 }
 
-async fn fulfill_oneoff(
+async fn fulfill_callback(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     body: Bytes,
@@ -609,21 +609,21 @@ async fn fulfill_oneoff(
     )
     .bind(id)
     .bind(&payload)
-    .bind(state.oneoff_retention_seconds)
+    .bind(state.callback_retention_seconds)
     .fetch_optional(&state.db)
     .await;
 
     match fulfilled {
         Ok(Some(id)) => (
             StatusCode::OK,
-            Json(OneOffFulfilledResponse {
+            Json(CallbackFulfilledResponse {
                 id,
                 status: "fulfilled",
             }),
         )
             .into_response(),
         Ok(None) => {
-            let existing = sqlx::query_as::<_, OneOffHookState>(
+            let existing = sqlx::query_as::<_, CallbackState>(
                 r#"
                 SELECT status, payload
                 FROM oneoff_hooks
@@ -640,7 +640,7 @@ async fn fulfill_oneoff(
                 {
                     (
                         StatusCode::OK,
-                        Json(OneOffFulfilledResponse {
+                        Json(CallbackFulfilledResponse {
                             id,
                             status: "fulfilled",
                         }),
@@ -649,32 +649,32 @@ async fn fulfill_oneoff(
                 }
                 Ok(Some(existing)) if existing.status == "fulfilled" => (
                     StatusCode::CONFLICT,
-                    Json(serde_json::json!({ "error": "one-off hook already fulfilled" })),
+                    Json(serde_json::json!({ "error": "callback already fulfilled" })),
                 )
                     .into_response(),
                 Ok(_) => StatusCode::NOT_FOUND.into_response(),
                 Err(err) => {
-                    eprintln!("failed to check one-off hook fulfillment: {err}");
+                    eprintln!("failed to check callback fulfillment: {err}");
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({ "error": "failed to fulfill one-off hook" })),
+                        Json(serde_json::json!({ "error": "failed to fulfill callback" })),
                     )
                         .into_response()
                 }
             }
         }
         Err(err) => {
-            eprintln!("failed to fulfill one-off hook: {err}");
+            eprintln!("failed to fulfill callback: {err}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "failed to fulfill one-off hook" })),
+                Json(serde_json::json!({ "error": "failed to fulfill callback" })),
             )
                 .into_response()
         }
     }
 }
 
-async fn cleanup_expired_oneoffs(db: &PgPool) -> Result<u64, sqlx::Error> {
+async fn cleanup_expired_callbacks(db: &PgPool) -> Result<u64, sqlx::Error> {
     let deleted = sqlx::query(
         r#"
         WITH expired AS (
@@ -1737,11 +1737,11 @@ mod tests {
                 suffix: vec![],
             },
             default_ttl_seconds: 300,
-            oneoff_pending_ttl_seconds: 14 * 24 * 60 * 60,
-            oneoff_retention_seconds: 72 * 60 * 60,
-            oneoff_max_body_bytes: 128,
-            oneoff_rate_limit_per_minute: 120,
-            oneoff_rate_limits: Arc::default(),
+            callback_pending_ttl_seconds: 14 * 24 * 60 * 60,
+            callback_retention_seconds: 72 * 60 * 60,
+            callback_max_body_bytes: 128,
+            callback_rate_limit_per_minute: 120,
+            callback_rate_limits: Arc::default(),
             subscriptions: Arc::default(),
             webhooks_changed: watch::channel(()).0,
         }
@@ -1752,18 +1752,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oneoff_rate_limit_is_per_ip_and_resets_after_one_minute() {
+    async fn callback_rate_limit_is_per_ip_and_resets_after_one_minute() {
         let mut state = test_state();
-        state.oneoff_rate_limit_per_minute = 2;
+        state.callback_rate_limit_per_minute = 2;
         let now = Instant::now();
         let ip: IpAddr = "192.0.2.1".parse().unwrap();
         let other_ip: IpAddr = "192.0.2.2".parse().unwrap();
 
-        assert!(allow_oneoff_request(&state, ip, now));
-        assert!(allow_oneoff_request(&state, ip, now));
-        assert!(!allow_oneoff_request(&state, ip, now));
-        assert!(allow_oneoff_request(&state, other_ip, now));
-        assert!(allow_oneoff_request(
+        assert!(allow_callback_request(&state, ip, now));
+        assert!(allow_callback_request(&state, ip, now));
+        assert!(!allow_callback_request(&state, ip, now));
+        assert!(allow_callback_request(&state, other_ip, now));
+        assert!(allow_callback_request(
             &state,
             ip,
             now + Duration::from_secs(60)
@@ -2148,7 +2148,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a PostgreSQL database in TEST_DATABASE_URL"]
-    async fn oneoff_endpoints_enforce_single_fulfillment_and_expiration() {
+    async fn callback_endpoints_enforce_single_fulfillment_and_expiration() {
         use axum::body::to_bytes;
 
         let mut state = test_state();
@@ -2163,7 +2163,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/oneoffs")
+                    .uri("/api/callbacks")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2266,7 +2266,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/oneoffs")
+                    .uri("/api/callbacks")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2307,7 +2307,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fulfill_expired.status(), StatusCode::NOT_FOUND);
-        assert!(cleanup_expired_oneoffs(&state.db).await.unwrap() >= 1);
+        assert!(cleanup_expired_callbacks(&state.db).await.unwrap() >= 1);
         let expired_remaining =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM oneoff_hooks WHERE id = $1")
                 .bind(Uuid::parse_str(expired_id).unwrap())
