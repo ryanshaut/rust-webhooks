@@ -19,9 +19,20 @@ Container images are published to `ghcr.io/ryanshaut/rust-webhooks`.
   - raw body as base64 for non-UTF8 payloads
   - delivery lifecycle fields: `status`, `active`, `substatus`, `ttl_expires_at`
 
+## Project structure
+
+- `src/main.rs` initializes configuration, shared state, and the Axum router.
+- `src/callbacks.rs` implements single-use callback slots and callback rate limiting.
+- `src/webhooks.rs` captures requests, parses path dimensions, and redacts sensitive values.
+- `src/consumer.rs` implements HTTP and WebSocket receive, check-in, and completion.
+- `src/operator.rs` implements read-only operator endpoints.
+- `src/storage.rs` creates and updates the PostgreSQL schema.
+- `src/tests.rs` contains unit tests and opt-in PostgreSQL integration tests.
+
 ## Configuration
 
-The app reads these env vars (matching `.env.example`):
+The app reads these environment variables. There is no checked-in `.env.example`; copy the
+settings below into a local `.env` file if desired.
 
 - `DB_USERNAME`
 - `DB_PASSWORD`
@@ -32,9 +43,16 @@ The app reads these env vars (matching `.env.example`):
 - `CALLBACK_PENDING_TTL_SECONDS` (optional, default `1209600` / 14 days)
 - `CALLBACK_RETENTION_SECONDS` (optional, default `259200` / 72 hours)
 - `CALLBACK_MAX_BODY_BYTES` (optional, default `1048576`)
-- `CALLBACK_RATE_LIMIT_PER_MINUTE` (optional, default `120` per client IP)
+- `CALLBACK_RATE_LIMIT_PER_MINUTE` (optional, default `120` per client IP for callback creation, polling, and fulfillment)
+- `SENSITIVE_HEADERS` (optional, comma-separated redaction patterns; see below)
+- `SENSITIVE_QUERY_KEYS` (optional, comma-separated redaction patterns; see below)
+- `PORT` (optional, default `3000`)
 
 By default, the server listens on `0.0.0.0:3000`.
+
+The API does not implement authentication or authorization. Restrict access to trusted
+clients using network controls or an authenticated reverse proxy, especially for the
+consumer and operator endpoints.
 
 ### Sensitive keys redaction
 
@@ -60,6 +78,28 @@ Patterns supported:
 ```bash
 cargo run
 ```
+
+## Tests
+
+Run the default unit and HTTP routing tests with:
+
+```bash
+cargo test
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+The PostgreSQL integration tests are ignored by default. To run them against a dedicated
+test database, start PostgreSQL and create the database:
+
+```bash
+docker compose -f db.docker-compose.yml up -d db
+docker exec postgres createdb -U postgres rust-webhooks-test
+TEST_DATABASE_URL=postgres://postgres@localhost:5432/rust-webhooks-test cargo test -- --ignored
+```
+
+These integration tests exercise callback fulfillment/expiry, webhook delivery over
+WebSockets, and the HTTP webhook/consumer/operator lifecycle.
 
 ## Quick start with published image
 
@@ -102,11 +142,12 @@ Quick smoke test:
 make k6-smoke
 ```
 
-## Database table
+## Database tables
 
-The table is auto-created on startup:
+The schema is created and updated automatically on startup. It includes:
 
-`incoming_webhooks`
+- `incoming_webhooks`: captured requests and consumer lifecycle state
+- `oneoff_hooks`: callback slots and fulfilled callback payloads
 
 ## Callback API
 
