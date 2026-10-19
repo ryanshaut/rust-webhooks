@@ -1,71 +1,54 @@
-# CI/CD guide
+# Release container images
 
-## Workflow overview
+This guide describes the workflows actually checked into the repository:
 
-This repository uses four GitHub Actions workflows:
+- **Container** (`container.yml`): builds pull requests and publishes images on
+  configured branch/tag pushes.
+- **Documentation** (`docs.yml`): validates and publishes the static documentation
+  site. See [Publish documentation](how-to/publish-docs.md).
 
-- `ci.yml`: runs formatting, clippy, tests, and release builds for pull requests and pushes to `main` / `feature/**`.
-- `container.yml`: builds and publishes images to GHCR with branch/SHA/version tagging.
-- `security.yml`: runs `cargo audit` plus Trivy scans (filesystem and image), and uploads SARIF.
-- `deploy.yml`: manual deployment scaffold for `staging` and `production` environments.
+There is currently no separate `ci.yml`, `security.yml`, or application `deploy.yml`.
+Do not rely on checks or deployments from those workflows.
 
-## Branch strategy
+## Check the application before releasing
 
-- `main`: protected integration branch.
-- `feature/*`: short-lived feature branches.
-- Pull requests required before merging to `main`.
-- CI must pass before merge.
-- Squash merge preferred.
+Run the [local Rust checks and integration tests](how-to/test.md). The Container
+workflow builds the release binary as part of the Docker build, but it does not
+run the formatting, Clippy, or test suite.
 
-### Sample branch protection (main)
+Prefer short-lived `feature/*` branches, pull requests into `main`, and squash
+merges. Configure branch protection against checks that actually exist, such as
+Container's `build-image` and Documentation's `Build documentation` when applicable.
+Documentation checks are path-filtered; requiring them for every pull request
+would leave unrelated pull requests waiting for a skipped workflow.
 
-Suggested settings in GitHub branch protection:
+## Publish from a branch
 
-- Require a pull request before merging
-- Require approvals (for example: at least 1)
-- Require status checks to pass before merging (`CI`, `Container`, and `Security` as desired)
-- Require branches to be up to date before merging
-- Restrict force pushes and branch deletion
-- Enforce for administrators
+Pushes to `main` and `feature/**` trigger the container workflow. Pull requests
+build images but do not log in to GHCR or push them.
 
-## Image naming conventions
+Published images use `ghcr.io/ryanshaut/rust-webhooks`:
 
-Images are pushed to:
+| Trigger | Tags |
+| --- | --- |
+| Push to `main` | `latest` and `sha-<short-sha>` |
+| Push to `feature/*` | Sanitized branch tag, such as `feature-example`, and SHA tag |
+| Matching semantic-version tag | Full version without leading `v`, major/minor version, and SHA tag |
 
-- `ghcr.io/<owner>/<repo>`
+For example, `v1.2.3` produces `1.2.3` and `1.2`, not an image tag named `v1.2.3`.
 
-Tagging rules:
+## Publish a version
 
-- `main` branch push: `latest`
-- `feature/*` branch push: `feature-<branch-name>`
-- any push/tag build: `sha-<short-sha>`
-- semantic version tags `vX.Y.Z`: `vX.Y.Z` and `X.Y`
-
-## Run checks locally
-
-Use the same commands as CI:
+After reviewing and merging a tested commit:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features --locked
-cargo build --release --locked
+git tag v1.2.3
+git push origin v1.2.3
 ```
 
-## Create a release tag
+The tag pattern `v*.*.*` triggers version publishing. The workflow uses the
+repository's `GITHUB_TOKEN` with package write permission; no personal token
+is required.
 
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-This triggers versioned container publishing.
-
-## Manually trigger deployment
-
-1. Open **Actions** in GitHub.
-2. Select the **Deploy** workflow.
-3. Click **Run workflow**.
-4. Choose `staging` or `production`.
-
-`production` should use GitHub Environment protection rules (for example, required reviewers) before job execution.
+Publishing an image does not deploy it. Choose and configure your own application
+hosting environment; the only deployment workflow provided here is for GitHub Pages.

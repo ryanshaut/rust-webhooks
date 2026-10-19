@@ -1,0 +1,67 @@
+site_name: rust-webhooks
+site_description: Capture, consume, and inspect webhooks with Rust and PostgreSQL.
+site_url: https://ryanshaut.github.io/rust-webhooks/
+repo_url: https://github.com/ryanshaut/rust-webhooks
+repo_name: ryanshaut/rust-webhooks
+edit_uri: edit/main/docs/
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+validation:
+  nav:
+    omitted_files: warn
+  links:
+    not_found: warn
+    unrecognized_links: warn
+    anchors: warn
+
+exclude_docs: |
+  requirements.txt
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - Your first webhook: tutorials/first-webhook.md
+      - Receive over WebSocket: tutorials/websocket.md
+  - How-to guides:
+      - Run a container: how-to/run-container.md
+      - Monitor with Grafana: how-to/monitor.md
+      - Test and load-test: how-to/test.md
+      - Publish documentation: how-to/publish-docs.md
+      - Release container images: cicd.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - HTTP API: reference/http-api.md
+      - WebSocket API: reference/websocket-api.md
+      - Storage and record format: reference/storage.md
+  - Explanation:
+      - Architecture: explanation/architecture.md
+      - Delivery lifecycle and limitations: explanation/lifecycle.md
