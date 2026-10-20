@@ -77,9 +77,9 @@ and variables used by the optional test, load-test, and development Compose setu
 | `SENSITIVE_QUERY_KEYS` | Server | Built-in list | Comma-separated query parameter names/patterns to redact; overrides the built-in list |
 | `TEST_DATABASE_URL` | PostgreSQL integration tests | None | Connection URL for the dedicated test database; not read by the server |
 | `BASE_URL` | k6 load tests | `http://localhost:2999` in the k6 scripts; Make targets default to `http://172.17.0.1:3001` | API base URL |
-| `VUS` | k6 load tests | `10` for webhook load tests, `30` for callback-user script; Make targets set their own values | Number of virtual users |
-| `DURATION` | k6 load tests | `30s` in the scripts; `make k6-smoke` and `make k6-smoke-10k` use `60s` | Test duration |
-| `RUN_ID` | Webhook k6 load test | `local` (`smoke` / `smoke-10k` in corresponding Make targets) | Identifier included in generated webhook query parameters |
+| `VUS` | k6 load tests | Scripts: `10` for webhook load test, `30` for callback-user script; Make targets: `10` (`k6`), `100` (`k6-smoke`), `10000` (`k6-smoke-10k`) | Number of virtual users |
+| `DURATION` | k6 load tests | Scripts and `make k6`: `30s`; smoke Make targets: `60s` | Test duration |
+| `RUN_ID` | Webhook k6 load test | `local` in script and `make k6`; `smoke` / `smoke-10k` in corresponding Make targets | Identifier included in generated webhook query parameters |
 | `POSTGRES_USER` | Development Compose database | `postgres` | PostgreSQL container's initial user |
 | `POSTGRES_DB` | Development Compose database | `rust-webhooks` | PostgreSQL container's initial database |
 | `POSTGRES_HOST_AUTH_METHOD` | Development Compose database | `trust` | PostgreSQL container authentication method; use safer authentication outside local development |
