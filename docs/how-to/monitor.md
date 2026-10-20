@@ -29,6 +29,7 @@ development environment.
 | Webhook Overview | Throughput, top tenants/apps, event mix, and recent payload explorer |
 | Webhook Dimensions Catalog | Distinct tenants, apps, events, and their combinations |
 | Webhook Payload Detail | Request metadata, headers, query parameters, and body for one ID |
+| Callback URLs Overview | One-off callback totals, pending/active/fulfilled/expired counts, ages, and time to fulfill |
 
 Provisioning loads dashboard JSON from
 [grafana/dashboards](https://github.com/ryanshaut/rust-webhooks/tree/main/grafana/dashboards)
