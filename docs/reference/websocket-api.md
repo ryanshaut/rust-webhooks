@@ -10,6 +10,10 @@
 Use `ws://` or `wss://` and a WebSocket upgrade. Optional `ttl_seconds` follows the
 HTTP receive rules; non-positive TTLs return `400` before upgrade.
 
+Dimensions accept the same [trailing wildcards as HTTP consumers](http-api.md#consumer-peek-and-receive).
+For example, `/api/consumer/ws/tenant/*/*` subscribes to all apps and events for
+that tenant. Invalid patterns such as `tenant/*/event` return `400` before upgrade.
+
 ## Messages and lifecycle
 
 The server sends one JSON text message containing the
@@ -33,8 +37,8 @@ It then ends the connection.
 
 ## Topic reservations
 
-Two topics overlap when they share tenant/app and either omits the event or both
-specify the same event.
+Two topics overlap when each dimension is equal or is a wildcard in either topic.
+An omitted event is a wildcard.
 
 - An overlapping WebSocket subscription returns HTTP `409` before upgrade.
 - An overlapping HTTP receive also returns `409`.

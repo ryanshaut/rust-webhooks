@@ -152,6 +152,69 @@ fn websocket_topic_overlap_preserves_http_event_wildcard_semantics() {
     assert!(!exact.overlaps(&topic("tenant", "app", Some("other"))));
 }
 
+#[test]
+fn wildcard_topics_overlap_only_matching_subsets() {
+    let exact = topic("tenant", "app", Some("event"));
+    for wildcard in [
+        topic("tenant", "app", Some("*")),
+        topic("tenant", "*", Some("*")),
+        topic("tenant", "*", None),
+        topic("*", "*", Some("*")),
+        topic("*", "*", None),
+    ] {
+        assert!(wildcard.overlaps(&exact));
+        assert!(exact.overlaps(&wildcard));
+        assert!(wildcard.overlaps(&wildcard));
+    }
+    assert!(!topic("tenant", "*", Some("*")).overlaps(&topic("other", "app", None)));
+    assert!(!topic("tenant", "app", Some("*")).overlaps(&topic("tenant", "other", None)));
+}
+
+#[tokio::test]
+async fn consumer_routes_reject_non_trailing_wildcards() {
+    let state = test_state();
+    let app = build_app(state.clone());
+    let (base, server) = start_test_server(state.clone()).await;
+    for scope in [
+        "*/app",
+        "*/app/event",
+        "*/*/event",
+        "*/app/*",
+        "tenant/*/event",
+        "tenant/%2A/event",
+    ] {
+        for (method, action) in [(Method::GET, "peek"), (Method::POST, "receive")] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/api/consumer/{action}/{scope}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{action}/{scope}"
+            );
+        }
+        let error = tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/{scope}"))
+            .await
+            .unwrap_err();
+        match error {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{scope}");
+            }
+            other => panic!("expected invalid wildcard, got {other}"),
+        }
+    }
+    assert!(state.subscriptions.topics.lock().unwrap().is_empty());
+    server.abort();
+}
+
 #[tokio::test]
 async fn websocket_registration_is_atomic_and_released_on_drop() {
     let registry = Arc::new(WebsocketSubscriptions::default());
@@ -244,7 +307,15 @@ async fn websocket_conflicts_block_only_overlapping_receive_and_release_on_disco
             .await
             .unwrap();
 
-    for scope in ["tenant/app/event", "tenant/app"] {
+    for scope in [
+        "tenant/app/event",
+        "tenant/app",
+        "tenant/app/*",
+        "tenant/*/*",
+        "*/*/*",
+        "tenant/*",
+        "*/*",
+    ] {
         let error = tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/{scope}"))
             .await
             .unwrap_err();
@@ -309,11 +380,184 @@ async fn websocket_conflicts_block_only_overlapping_receive_and_release_on_disco
     .await
     .unwrap();
     let (mut replacement, _) =
-        tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/tenant/app"))
+        tokio_tungstenite::connect_async(format!("{base}/api/consumer/ws/tenant/*/*"))
             .await
             .unwrap();
     replacement.close(None).await.unwrap();
     server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires a PostgreSQL database in TEST_DATABASE_URL"]
+async fn wildcard_consumers_match_correct_subsets() {
+    use axum::body::to_bytes;
+    use futures_util::StreamExt;
+
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let database_url = env::var("TEST_DATABASE_URL").unwrap();
+    let db = PgPool::connect(&database_url).await.unwrap();
+    let schema = format!("wildcard_test_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&db)
+        .await
+        .unwrap();
+    let mut state = test_state();
+    state.db = PgPoolOptions::new()
+        .connect_with(
+            database_url
+                .parse::<sqlx::postgres::PgConnectOptions>()
+                .unwrap()
+                .options([("search_path", schema.as_str())]),
+        )
+        .await
+        .unwrap();
+    ensure_schema(&state.db).await.unwrap();
+    let app = build_app(state.clone());
+    let (base, server) = start_test_server(state.clone()).await;
+    let paths = [
+        "tenant/app/first",
+        "tenant/app/second",
+        "tenant/other/third",
+        "other/app/fourth",
+    ];
+    for path in paths {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/webhooks/{path}"))
+                    .body(Body::from("payload"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    for (scope, count) in [
+        ("tenant/app/first", 1),
+        ("tenant/app", 2),
+        ("tenant/app/*", 2),
+        ("tenant/app/%2A", 2),
+        ("tenant/*", 3),
+        ("tenant/*/*", 3),
+        ("*/*", 4),
+        ("*/*/*", 4),
+    ] {
+        for transport in ["http", "websocket"] {
+            sqlx::query("UPDATE incoming_webhooks SET status = 'new', ttl_expires_at = NULL")
+                .execute(&state.db)
+                .await
+                .unwrap();
+            let peek = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/consumer/peek/{scope}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(peek.status(), StatusCode::OK, "{scope}");
+            let peek: Value =
+                serde_json::from_slice(&to_bytes(peek.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(peek["path"], format!("/api/webhooks/{}", paths[0]));
+            assert_eq!(peek["status"], "new");
+            let mut socket = if transport == "websocket" {
+                Some(
+                    tokio_tungstenite::connect_async(format!(
+                        "{base}/api/consumer/ws/{scope}?ttl_seconds=60"
+                    ))
+                    .await
+                    .unwrap()
+                    .0,
+                )
+            } else {
+                None
+            };
+            for path in &paths[..count] {
+                let received: Value = if let Some(socket) = &mut socket {
+                    let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap()
+                } else {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(Method::POST)
+                                .uri(format!("/api/consumer/receive/{scope}?ttl_seconds=60"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::OK, "{scope}");
+                    serde_json::from_slice(
+                        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                    )
+                    .unwrap()
+                };
+                assert_eq!(received["path"], format!("/api/webhooks/{path}"), "{scope}");
+                assert_eq!(received["status"], "received");
+                assert_eq!(received["active"], true);
+                let expiry =
+                    DateTime::parse_from_rfc3339(received["ttl_expires_at"].as_str().unwrap())
+                        .unwrap();
+                assert!((expiry.with_timezone(&Utc) - Utc::now()).num_seconds() > 55);
+            }
+            if let Some(mut socket) = socket {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), socket.next())
+                        .await
+                        .is_err(),
+                    "{scope}"
+                );
+                socket.close(None).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !state.subscriptions.topics.lock().unwrap().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            for action in ["peek", "receive"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(if action == "peek" {
+                                Method::GET
+                            } else {
+                                Method::POST
+                            })
+                            .uri(format!("/api/consumer/{action}/{scope}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::NO_CONTENT,
+                    "{action}/{scope}"
+                );
+            }
+        }
+    }
+    server.abort();
+    state.db.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&db)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

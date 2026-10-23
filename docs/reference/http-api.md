@@ -63,6 +63,11 @@ Peek and receive return `200` with a [stored webhook record](storage.md#stored-w
 or `204` with no body when no pending record matches. Candidates are ordered by
 `received_at` ascending; claims use PostgreSQL row locking with `SKIP LOCKED`.
 
+Each dimension accepts `*` as a whole-segment wildcard. Wildcards must be trailing:
+`tenant/app/*`, `tenant/*/*`, and `*/*/*` are valid; `tenant/*/event` and
+`*/app/event` return `400`. Omitting the event is equivalent to using `*`, so
+`tenant/*` and `*/*` are also valid.
+
 Receive accepts optional `ttl_seconds`, a positive integer; omission uses
 `DEFAULT_RECEIVE_TTL_SECONDS`. Non-positive TTLs return `400` when TTL validation
 is reached. An overlapping active WebSocket reservation returns `409`.
