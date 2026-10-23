@@ -55,9 +55,13 @@ struct WebhookTopic {
 
 impl WebhookTopic {
     fn overlaps(&self, other: &Self) -> bool {
-        self.tenant == other.tenant
-            && self.app == other.app
-            && (self.event.is_none() || other.event.is_none() || self.event == other.event)
+        let matches = |left: &str, right: &str| left == "*" || right == "*" || left == right;
+        matches(&self.tenant, &other.tenant)
+            && matches(&self.app, &other.app)
+            && matches(
+                self.event.as_deref().unwrap_or("*"),
+                other.event.as_deref().unwrap_or("*"),
+            )
     }
 }
 

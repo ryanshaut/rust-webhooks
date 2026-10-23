@@ -1,5 +1,26 @@
 use super::*;
 
+fn validate_topic(
+    tenant: &str,
+    app: &str,
+    event: Option<&str>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let mut wildcard = false;
+    for segment in [Some(tenant), Some(app), event].into_iter().flatten() {
+        if segment == "*" {
+            wildcard = true;
+        } else if wildcard {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "wildcards must be trailing: no literal segment may follow '*'"
+                })),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn peek_webhook_tenant_app(
     State(state): State<AppState>,
     Path((tenant, app)): Path<(String, String)>,
@@ -74,6 +95,9 @@ pub(super) async fn websocket_receive(
     ttl_query: TtlQueryParams,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if let Err(error) = validate_topic(&topic.tenant, &topic.app, topic.event.as_deref()) {
+        return error.into_response();
+    }
     let ttl_seconds = match resolve_ttl_seconds(ttl_query.ttl_seconds, state.default_ttl_seconds) {
         Ok(ttl) => ttl,
         Err(status) => {
@@ -315,6 +339,9 @@ pub(super) async fn peek_webhook(
     app: &str,
     event: Option<&str>,
 ) -> Response {
+    if let Err(error) = validate_topic(tenant, app, event) {
+        return error.into_response();
+    }
     if let Err(response) = expire_stale_claims(&state.db).await {
         return response;
     }
@@ -342,9 +369,9 @@ pub(super) async fn peek_webhook(
             result,
             extra_properties
         FROM incoming_webhooks
-        WHERE tenant = $1
-          AND app = $2
-          AND ($3::text IS NULL OR event = $3)
+        WHERE ($1 = '*' OR tenant = $1)
+          AND ($2 = '*' OR app = $2)
+          AND ($3::text IS NULL OR $3 = '*' OR event = $3)
           AND status = 'new'
           AND active = TRUE
         ORDER BY received_at ASC
@@ -378,6 +405,9 @@ pub(super) async fn receive_webhook(
     event: Option<&str>,
     requested_ttl_seconds: Option<i64>,
 ) -> Response {
+    if let Err(error) = validate_topic(tenant, app, event) {
+        return error.into_response();
+    }
     let topic = WebhookTopic {
         tenant: tenant.to_string(),
         app: app.to_string(),
@@ -419,9 +449,9 @@ pub(super) async fn claim_webhook(
         WITH candidate AS (
             SELECT id
             FROM incoming_webhooks
-            WHERE tenant = $1
-              AND app = $2
-              AND ($3::text IS NULL OR event = $3)
+            WHERE ($1 = '*' OR tenant = $1)
+              AND ($2 = '*' OR app = $2)
+              AND ($3::text IS NULL OR $3 = '*' OR event = $3)
               AND status = 'new'
               AND active = TRUE
             ORDER BY received_at ASC
