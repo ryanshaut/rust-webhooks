@@ -13,7 +13,7 @@
           "enable": true,
           "hide": true,
           "iconColor": "rgba(0, 211, 255, 1)",
-          "name": "Annotations & Alerts",
+          "name": "Annotations \u0026 Alerts",
           "query": {
             "datasource": {
               "name": "-- Grafana --"
@@ -27,6 +27,7 @@
       }
     ],
     "cursorSync": "Off",
+    "description": "",
     "editable": true,
     "elements": {
       "panel-1": {
@@ -1141,7 +1142,20 @@
         ]
       }
     },
-    "links": [],
+    "links": [
+      {
+        "asDropdown": false,
+        "icon": "external link",
+        "includeVars": false,
+        "keepTime": false,
+        "tags": [],
+        "targetBlank": true,
+        "title": "Source (GitHub)",
+        "tooltip": "View source file in repository",
+        "type": "link",
+        "url": "https://github.com/ryanshaut/rust-webhooks/blob/main/grafana/dashboards/webhooks-overview.json"
+      }
+    ],
     "liveNow": false,
     "preload": false,
     "tags": [
@@ -1175,8 +1189,8 @@
         "spec": {
           "allowCustomValue": true,
           "current": {
-            "text": "rust-webhooks",
-            "value": "afsflflaknjswd"
+            "text": "rust-webhooks-db-k3s594",
+            "value": "eg1ucjrj33ls0b"
           },
           "hide": "dontHide",
           "includeAll": false,
@@ -1197,7 +1211,7 @@
           "allowCustomValue": true,
           "current": {
             "text": "All",
-            "value": "__all"
+            "value": "$__all"
           },
           "definition": "WITH enriched AS (\n  SELECT COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT tenant AS __text, tenant AS __value\nFROM enriched\nWHERE tenant IS NOT NULL\nORDER BY 1;",
           "hide": "dontHide",
@@ -1231,7 +1245,7 @@
           "allowCustomValue": true,
           "current": {
             "text": "All",
-            "value": "__all"
+            "value": "$__all"
           },
           "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT app AS __text, app AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\nORDER BY 1;",
           "hide": "dontHide",
@@ -1265,7 +1279,7 @@
           "allowCustomValue": true,
           "current": {
             "text": "All",
-            "value": "__all"
+            "value": "$__all"
           },
           "definition": "WITH enriched AS (\n  SELECT\n    COALESCE(NULLIF(tenant, ''), 'unknown') AS tenant,\n    COALESCE(NULLIF(app, ''), 'unknown') AS app,\n    COALESCE(NULLIF(event, ''), 'unknown') AS event\n  FROM incoming_webhooks\n  WHERE $__timeFilter(received_at)\n)\nSELECT DISTINCT event AS __text, event AS __value\nFROM enriched\nWHERE ('${tenant}' = '__all' OR tenant = '${tenant}')\n  AND ('${app}' = '__all' OR app = '${app}')\nORDER BY 1;",
           "hide": "dontHide",
